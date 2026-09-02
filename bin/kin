@@ -36,6 +36,12 @@
     (for [target (:targets cfg [:rust :java :csharp])]
       (let [ctx (assoc (kin/context {} target)
                        :vocabs vocabs :scope-syms scope
+                       ;; How each target spells a dashed local. A VOCABULARY
+                       ;; supplies it; the library has no opinion.
+                       :naming (reduce (fn [m v]
+                                         (if-let [n (resolve (symbol (str v) "naming"))]
+                                           (merge m @n) m))
+                                       {} (cons 'kin.lang (:vocabularies cfg)))
                        :locals (atom {}) :names (atom {}) :tmp (atom 0))]
         (doseq [f forms] (kin/kin-statement! ctx f))
         [target (kin/kin-output ctx)]))))

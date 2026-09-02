@@ -15,6 +15,19 @@
 
 (defn t [ctx] (:target ctx))
 
+(defn- snake [s] (str/replace s "-" "_"))
+(defn- camel [s]
+  (let [[h & r] (str/split s #"-")] (str h (str/join (mapv str/capitalize r)))))
+
+(def naming
+  "How each target spells a dashed LOCAL.
+
+  Lives here, not in the library, because it is a fact about three languages.
+  Locals are camel in BOTH Java and C#, where FUNCTIONS are camel and Pascal
+  -- one rule for both emitted `ItemHash`, which is what put this in a table
+  rather than in a rule."
+  {:rust snake :java camel :csharp camel})
+
 (defn fmt [tmpl args]
   (reduce (fn [s i] (str/replace s (str "{" i "}") (nth args i ""))) tmpl (range (count args))))
 
@@ -216,7 +229,7 @@
                ;; says the thing and each target spends what it must.
                (str/join ", " (cons* (when recv (if (:mut (meta recv)) "&mut self" "&self"))
                                      (mapv (fn [[p tag]] (str (when (:mut (meta p)) "mut ")
-                                                              (sp/local-name :rust p) ": " (ty tag))) ps)))
+                                                              (snake (str p)) ": " (ty tag))) ps)))
                ")"
                (cond
                  (and ret throws?) (str " -> Result<" (ty ret) ", String>")
@@ -228,12 +241,12 @@
                ctx (sp/indent-of ctx) (if pub? "public static " "static ")
                (if ret (ty ret) "void") " " (target-name ctx nm) "("
                (str/join ", " (cons* (when recv (str (ty (:tag (meta recv))) " " recv))
-                                     (mapv (fn [[p tag]] (str (ty tag) " " (sp/local-name :java p))) ps))) ") {\n")
+                                     (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n")
         :csharp (sp/kin-emit!
                  ctx (sp/indent-of ctx) (if pub? "public static " "static ")
                (if ret (ty ret) "void") " " (target-name ctx nm) "("
                  (str/join ", " (cons* (when recv (str (ty (:tag (meta recv))) " " recv))
-                                       (mapv (fn [[p tag]] (str (ty tag) " " (sp/local-name :csharp p))) ps))) ") {\n"))
+                                       (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n"))
       (let [wrap? (and unchecked? (= :csharp (t ctx)))]
         (sp/kin-scoped
          ctx {:key :fn :value nm :indent 1}
@@ -257,7 +270,7 @@
                            ;; is reassigned. Found the moment a loop existed to
                            ;; accumulate into one -- `let acc: u32 = 0;`
                            ;; followed by `acc = ...` does not compile.
-                           (let [n (sp/local-name (t ctx) nm)]
+                           (let [n (sp/local-name ctx nm)]
                              (case (t ctx)
                                :rust (str "let " (when (:mut (meta nm)) "mut ")
                                           n ": " ty " = " code ";\n")
@@ -452,7 +465,7 @@
     (let [[_ binding & body] form
           [nm start end] binding
           ty (get-in (or (sp/kin-tag ctx (:tag (meta nm))) default) [:types (t ctx)])
-          n (sp/local-name (t ctx) nm)
+          n (sp/local-name ctx nm)
           a (strip-parens (sp/kin-render ctx start))
           b (strip-parens (sp/kin-render ctx end))]
       (sp/kin-emit! ctx (sp/indent-of ctx)

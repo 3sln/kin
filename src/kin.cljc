@@ -330,21 +330,28 @@
     :else (kin-emit! ctx (literal ctx form))))
 
 (defn local-name
-  "A dashed name, spelled the way the target spells a LOCAL.
+  "A dashed name, spelled the way this TARGET spells a local.
 
-  Only dashes are touched, so `SEED` and `C1` pass through untouched -- a
-  constant is written the same in all three and must not be camelised into
-  something a reader cannot grep for. Locals are camel in BOTH Java and C#,
-  which is where they differ from a function name: C# pascalises the function
-  and not the variable, and one rule for both would have produced `ItemHash`."
-  [target sym]
+  The library does not know how any target spells anything, and this is the
+  one place it was ever tempted to: it used to say that `:rust` writes
+  `snake_case` and everything else camelises. That is a fact about three
+  languages sitting in a file whose whole job is to not know about any.
+
+  So the naming lives in the context, under `:naming` -- a map from target to
+  a function -- and a VOCABULARY supplies it, exactly as it supplies every
+  other per-target fact. A target with no entry gets its name unchanged, which
+  is the honest default: a tool that has not been told a convention should not
+  invent one.
+
+  Only dashed names are touched at all, so a constant like `SEED` passes
+  through whatever the naming says."
+  [ctx sym]
   (let [s (str sym)]
     (if-not (clojure.string/includes? s "-")
       s
-      (case target
-        :rust (clojure.string/replace s "-" "_")
-        (let [[h & r] (clojure.string/split s #"-")]
-          (str h (clojure.string/join (mapv clojure.string/capitalize r))))))))
+      (if-let [f (get (:naming ctx) (:target ctx))]
+        (f s)
+        s))))
 
 (defn literal
   "A non-form: a symbol, a number, a string, a boolean."
@@ -353,7 +360,7 @@
     (string? v) (pr-str v)
     (symbol? v) (or (vocab-name ctx v)
                     (get-in (some-> (:names ctx) deref) [v (:target ctx)])
-                    (local-name (:target ctx) v))
+                    (local-name ctx v))
     (nil? v) (or (kin-get ctx :nil) "null")
     :else (str v)))
 
