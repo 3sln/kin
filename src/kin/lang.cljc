@@ -105,6 +105,16 @@
 (def ops
   {'+ "+" '- "-" '* "*" '< "<" '> ">" '== "==" 'not "!"
    '>= ">=" '<= "<=" '!= "!="
+   ;; THE BOOLEAN CONNECTIVES, spelled identically on all three.
+   ;;
+   ;; One line, and it unblocks more functions than every structural hole
+   ;; combined -- fifteen in one runtime's seq, equality and regex files
+   ;; alone, plus every `&&` guard elsewhere. It was missing for the first
+   ;; four sources that shipped because none of them happened to need a
+   ;; boolean connective, which is the whole lesson: a capability census
+   ;; taken from the files that shipped is a census of what those files
+   ;; needed, not of what the next one will.
+   'and "&&" 'or "||"
    'bit-and "&" 'bit-or "|" 'bit-xor "^"
    ;; Integer division. `/` on two ints truncates in all three, so `quot` is
    ;; the honest name for what it does -- and `/` is left unbound rather than
