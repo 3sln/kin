@@ -1,0 +1,50 @@
+#!/usr/bin/env bb
+;; kin: write a unit of logic once, emit it for every target.
+;;
+;; Three commands, and the middle one is the point:
+;;
+;;   kin gen     <source.kin>   print what each target would get
+;;   kin verify  <source.kin>   compile and RUN all three, require identical output
+;;   kin emit    <source.kin>   substitute into the target files, between markers
+;;
+;; A project says what its vocabularies are in `kin.edn`; this knows nothing
+;; about any particular runtime.
+(require '[clojure.string :as str] '[clojure.edn :as edn] '[babashka.process :as p])
+
+(def cfg (if (.exists (java.io.File. "kin.edn"))
+           (edn/read-string (slurp "kin.edn"))
+           {:vocabularies [] :targets [:rust :java :csharp]}))
+
+(doseq [v (:vocabularies cfg)] (require v))
+
+(def vocabs
+  (into {} (for [v (:vocabularies cfg)]
+             [v (cond-> {:forms ((resolve (symbol (str v) "forms-for")))}
+                  (resolve (symbol (str v) "tags-for"))
+                  (assoc :tags @(resolve (symbol (str v) "tags-for")))
+                  (resolve (symbol (str v) "names-for"))
+                  (assoc :names @(resolve (symbol (str v) "names-for"))))])))
+
+(defn generate
+  "The source, rendered for every target. `[[target text] ...]`."
+  [path]
+  (let [src (slurp path)
+        all (edn/read-string {:readers {}} (str "[" src "]"))
+        ns-form (first (filter #(and (seq? %) (= 'ns (first %))) all))
+        forms (vec (remove #(and (seq? %) (= 'ns (first %))) all))
+        scope (when ns-form (kin/require-scope ns-form vocabs))]
+    (for [target (:targets cfg [:rust :java :csharp])]
+      (let [ctx (assoc (kin/context {} target)
+                       :vocabs vocabs :scope-syms scope
+                       :locals (atom {}) :names (atom {}) :tmp (atom 0))]
+        (doseq [f forms] (kin/kin-statement! ctx f))
+        [target (kin/kin-output ctx)]))))
+
+(let [[cmd path] *command-line-args*]
+  (case cmd
+    "gen" (doseq [[t text] (generate path)]
+            (println (str "==== " (name t) " ===================================="))
+            (print text) (println))
+    (do (println "kin: unknown command" (pr-str cmd))
+        (println "usage: kin gen|verify|emit <source.kin>")
+        (System/exit 2))))
