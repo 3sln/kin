@@ -330,28 +330,21 @@
     :else (kin-emit! ctx (literal ctx form))))
 
 (defn local-name
-  "A dashed name, spelled the way this TARGET spells a local.
+  "A dashed name, spelled the way THIS TARGET spells a local.
 
-  The library does not know how any target spells anything, and this is the
-  one place it was ever tempted to: it used to say that `:rust` writes
-  `snake_case` and everything else camelises. That is a fact about three
-  languages sitting in a file whose whole job is to not know about any.
+  The library knows no language. It asks the target, which is a map a project
+  supplies -- `:local-name` is one of its functions, alongside `:fn-name` and
+  the rest. A target that does not say gets its name unchanged, which is the
+  honest default: a tool that has not been told a convention must not invent
+  one.
 
-  So the naming lives in the context, under `:naming` -- a map from target to
-  a function -- and a VOCABULARY supplies it, exactly as it supplies every
-  other per-target fact. A target with no entry gets its name unchanged, which
-  is the honest default: a tool that has not been told a convention should not
-  invent one.
-
-  Only dashed names are touched at all, so a constant like `SEED` passes
-  through whatever the naming says."
+  Only dashed names are touched, so a constant like `SEED` passes through
+  whatever the target says."
   [ctx sym]
   (let [s (str sym)]
     (if-not (clojure.string/includes? s "-")
       s
-      (if-let [f (get (:naming ctx) (:target ctx))]
-        (f s)
-        s))))
+      ((get-in ctx [:targets (:target ctx) :local-name] identity) s))))
 
 (defn literal
   "A non-form: a symbol, a number, a string, a boolean."

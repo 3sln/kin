@@ -11,22 +11,13 @@
   needs a different `let` can still have one. What it must not do is get them
   by accident, which is why this is a namespace a source has to name."
   (:require [kin :as sp]
+            [kin.target]
             [clojure.string :as str]))
 
 (defn t [ctx] (:target ctx))
 
-(defn- snake [s] (str/replace s "-" "_"))
-(defn- camel [s]
-  (let [[h & r] (str/split s #"-")] (str h (str/join (mapv str/capitalize r)))))
-
-(def naming
-  "How each target spells a dashed LOCAL.
-
-  Lives here, not in the library, because it is a fact about three languages.
-  Locals are camel in BOTH Java and C#, where FUNCTIONS are camel and Pascal
-  -- one rule for both emitted `ItemHash`, which is what put this in a table
-  rather than in a rule."
-  {:rust snake :java camel :csharp camel})
+(def snake kin.target/snake)
+(def camel kin.target/camel)
 
 (defn fmt [tmpl args]
   (reduce (fn [s i] (str/replace s (str "{" i "}") (nth args i ""))) tmpl (range (count args))))
@@ -148,11 +139,14 @@
 
 (defn- cons* [x xs] (if x (cons x xs) xs))
 
-(defn target-name [ctx nm]
-  (case (t ctx)
-    :rust (str/replace (str nm) "-" "_")
-    :java (let [[h & r] (str/split (str nm) #"-")] (str h (str/join (mapv str/capitalize r))))
-    :csharp (str/join (mapv str/capitalize (str/split (str nm) #"-")))))
+(defn target-name
+  "A dashed function name, spelled the way this target spells one.
+
+  From the TARGET's `:fn-name`, not from a `case` over three keywords this
+  file happened to know. That is what lets a project add a fourth language
+  without editing this one."
+  [ctx nm]
+  ((get-in ctx [:targets (:target ctx) :fn-name] str) (str nm)))
 
 (defn- ty-of [ctx default tag] (get-in (or (sp/kin-tag ctx tag) default) [:types (t ctx)]))
 
@@ -185,7 +179,21 @@
           ;; function three ways, and it is the difference that has kept `Eq`,
           ;; `Seqs` and most of the bulk out of reach -- not the bodies, which
           ;; already agree, but where the receiver goes.
-          method? (:method (meta nm))
+          ;; `^:method` -- Rust `self`, the others a static taking it.
+          ;; `^:instance` -- an instance method on ALL THREE.
+          ;;
+          ;; Two questions that wore one mark until a table's own methods
+          ;; needed the second: `Rt.category` really is a static on the JVM
+          ;; taking the runtime, and `InternTable.mask` really is an instance
+          ;; method there as it is in Rust.
+          ;;
+          ;; NOT named `instance?`: that is `clojure.core/instance?`, and a
+          ;; local that shadows it reads fine until the binding is dropped,
+          ;; at which point the core FUNCTION resolves in its place and is
+          ;; truthy. Every function then emitted as an instance method, with
+          ;; no error anywhere.
+          on-inst? (:instance (meta nm))
+          method? (or (:method (meta nm)) on-inst?)
           recv (when method? (first params))
           params (if method? (rest params) params)
           ps (partition 2 (interleave params (map (fn [p] (:tag (meta p))) params)))
@@ -194,12 +202,15 @@
       ;; other two, so a body that says `(. rt gc)` comes out as `self.gc`
       ;; there and `rt.gc` here. Registering the NAME is all that takes.
       (when recv
-        (sp/kin-declare-name! ctx recv {:rust "self" :java (str recv) :csharp (str recv)}))
+        (sp/kin-declare-name!
+         ctx recv (if on-inst?
+                    {:rust "self" :java "this" :csharp "this"}
+                    {:rust "self" :java (str recv) :csharp (str recv)})))
       (sp/kin-declare!
        ctx nm
        (fn [c f]
          (let [as (mapv (fn [x] (sp/kin-render c x)) (rest f))
-               code (str (if (and method? (= :rust (t c)))
+               code (str (if (or on-inst? (and method? (= :rust (t c))))
                            (str (first as) "." (target-name c nm)
                                 "(" (str/join ", " (rest as)) ")")
                            (str (target-name c nm) "(" (str/join ", " as) ")"))
@@ -243,9 +254,15 @@
                (str/join ", " (cons* (when recv (str (ty (:tag (meta recv))) " " recv))
                                      (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n")
         :csharp (sp/kin-emit!
-                 ctx (sp/indent-of ctx) (if pub? "public static " "static ")
-               (if ret (ty ret) "void") " " (target-name ctx nm) "("
-                 (str/join ", " (cons* (when recv (str (ty (:tag (meta recv))) " " recv))
+                 ctx (sp/indent-of ctx)
+                 ;; C# class members default to PRIVATE where Java defaults to
+                 ;; package-private, so an unmarked instance method needs
+                 ;; `internal` to mean what the Java one means.
+                 (cond on-inst? (if pub? "public " "internal ")
+                       pub? "public static " :else "static ")
+                 (if ret (ty ret) "void") " " (target-name ctx nm) "("
+                 (str/join ", " (cons* (when (and recv (not on-inst?))
+                                         (str (ty (:tag (meta recv))) " " recv))
                                        (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n"))
       (let [wrap? (and unchecked? (= :csharp (t ctx)))]
         (sp/kin-scoped

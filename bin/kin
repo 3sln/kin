@@ -9,11 +9,21 @@
 ;;
 ;; A project says what its vocabularies are in `kin.edn`; this knows nothing
 ;; about any particular runtime.
-(require '[clojure.string :as str] '[clojure.edn :as edn] '[babashka.process :as p])
+(require '[clojure.string :as str] '[clojure.edn :as edn] '[kin.target :as target])
 
+;; A project's `kin.edn` names its vocabularies and, optionally, its TARGETS.
+;; `:targets` may be a vector of keys naming kin's defaults, or a map of full
+;; descriptors -- a project targeting a language kin has never heard of writes
+;; the descriptor itself and kin needs no change.
 (def cfg (if (.exists (java.io.File. "kin.edn"))
            (edn/read-string (slurp "kin.edn"))
-           {:vocabularies [] :targets [:rust :java :csharp]}))
+           {:vocabularies []}))
+
+(def targets
+  (let [t (:targets cfg [:rust :java :csharp])]
+    (if (map? t)
+      (reduce-kv (fn [m k v] (assoc m k (merge (get target/defaults k) v))) {} t)
+      (select-keys target/defaults t))))
 
 (doseq [v (:vocabularies cfg)] (require v))
 
@@ -33,15 +43,10 @@
         ns-form (first (filter #(and (seq? %) (= 'ns (first %))) all))
         forms (vec (remove #(and (seq? %) (= 'ns (first %))) all))
         scope (when ns-form (kin/require-scope ns-form vocabs))]
-    (for [target (:targets cfg [:rust :java :csharp])]
+    (for [target (keys targets)]
       (let [ctx (assoc (kin/context {} target)
                        :vocabs vocabs :scope-syms scope
-                       ;; How each target spells a dashed local. A VOCABULARY
-                       ;; supplies it; the library has no opinion.
-                       :naming (reduce (fn [m v]
-                                         (if-let [n (resolve (symbol (str v) "naming"))]
-                                           (merge m @n) m))
-                                       {} (cons 'kin.lang (:vocabularies cfg)))
+                       :targets targets
                        :locals (atom {}) :names (atom {}) :tmp (atom 0))]
         (doseq [f forms] (kin/kin-statement! ctx f))
         [target (kin/kin-output ctx)]))))
