@@ -552,6 +552,30 @@
                       (fn [inner] (doseq [f body] (sp/kin-statement! inner f))))
     (sp/kin-emit! ctx (sp/indent-of ctx) "}\n")))
 
+(defn- forever-form
+  "`(forever body...)` -- a loop with no test, left only by `break` or `return`.
+
+  Rust spells it `loop`; the other two spell it `for (;;)`. Neither `while`
+  nor `for` can stand in:
+
+  * `(while true ...)` emits `while true` in Rust, which rustc lints
+    (`while_true`, warn by default) precisely because `loop` is the intended
+    spelling. Generated code that trips a lint the hand-written code did not
+    is a regression in the output.
+  * and `loop` is not merely `while true` to the type checker. Rust knows a
+    `loop` with no `break` diverges, so a function whose every exit is a
+    `return` inside one needs nothing after it; `while true` does not carry
+    that, and the same function then fails to compile for want of a trailing
+    return -- which JAVA in turn rejects as unreachable. Between them the two
+    spellings leave no shape that satisfies all three, which is the argument
+    for having this form at all rather than a workaround at each use."
+  [ctx form]
+  (sp/kin-emit! ctx (sp/indent-of ctx)
+                   (if (= :rust (t ctx)) "loop {\n" "for (;;) {\n"))
+  (sp/kin-scoped ctx {:key :in-loop :value true :indent 1}
+                    (fn [inner] (doseq [f (rest form)] (sp/kin-statement! inner f))))
+  (sp/kin-emit! ctx (sp/indent-of ctx) "}\n"))
+
 (defn- case-form
   "`(case expr [tags...] value ... :else value)`. A form that RETURNS.
 
@@ -649,7 +673,7 @@
     'comment comment-form 'doc doc-form
     'case case-form 'defconst defconst-form
     'local (local-form default-tag)
-    'for (for-form default-tag) 'while while-form
+    'for (for-form default-tag) 'while while-form 'forever forever-form
     'break (fn [ctx _] (sp/kin-emit! ctx (sp/indent-of ctx) "break;\n"))
     'continue (fn [ctx _] (sp/kin-emit! ctx (sp/indent-of ctx) "continue;\n"))
     'do (fn [ctx form] (doseq [f (rest form)] (sp/kin-statement! ctx f)))}
