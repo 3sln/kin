@@ -25,6 +25,14 @@
       (reduce-kv (fn [m k v] (assoc m k (merge (get target/defaults k) v))) {} t)
       (select-keys target/defaults t))))
 
+;; The order a project WROTE its targets in, which is the order every command
+;; prints them in. A set has no order and `(keys targets)` has an accidental
+;; one; a reader diffing two runs of `kin gen` should not be reading a
+;; reordering.
+(def target-order
+  (let [t (:targets cfg [:rust :java :csharp])]
+    (vec (if (map? t) (keys t) t))))
+
 ;; A VOCABULARY IS ONE VAR, holding one map.
 ;;
 ;; It used to be three vars found by convention -- `forms-for`, `tags-for`,
@@ -60,15 +68,41 @@
 (def vocabs
   (into {} (for [v (:vocabularies cfg)] [v (load-vocabulary v)])))
 
-(defn generate
-  "The source, rendered for every target. `[[target text] ...]`."
+(defn read-source
+  "A source file: its `ns` form, its forms, its require scope and its report."
   [path]
-  (let [src (slurp path)
-        all (edn/read-string {:readers {}} (str "[" src "]"))
+  (let [all (edn/read-string {:readers {}} (str "[" (slurp path) "]"))
         ns-form (first (filter #(and (seq? %) (= 'ns (first %))) all))
         forms (vec (remove #(and (seq? %) (= 'ns (first %))) all))
-        scope (when ns-form (kin/require-scope ns-form vocabs))]
-    (for [target (keys targets)]
+        report (when ns-form (kin/target-report ns-form vocabs))]
+    {:path path
+     :ns ns-form
+     :forms forms
+     :scope (when ns-form (kin/require-scope ns-form vocabs))
+     :report report
+     ;; What this source generates for HERE: what it asks for, narrowed to
+     ;; what the project has a target description for. The two are different
+     ;; questions and `kin why` shows both -- a vocabulary speaking a language
+     ;; the project has not configured is not an error, it is a project that
+     ;; has not asked for it yet.
+     :emit-for (let [want (if report (:targets report) (set target-order))
+                     have (filterv want target-order)]
+                 (when (empty? have)
+                   (throw (ex-info
+                           (str "kin: " path " generates for "
+                                (pr-str (vec (sort-by str want)))
+                                " and this project configures "
+                                (pr-str target-order)
+                                " -- nothing in common, so there is nothing"
+                                " to write.")
+                           {:source path :wants want :configured target-order})))
+                 have)}))
+
+(defn generate
+  "The source, rendered for every target it generates for. `[[target text] ...]`."
+  [path]
+  (let [{:keys [forms scope emit-for]} (read-source path)]
+    (for [target emit-for]
       (let [ctx (assoc (kin/context {} target)
                        :vocabs vocabs :scope-syms scope
                        :targets targets

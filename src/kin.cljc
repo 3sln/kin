@@ -35,7 +35,8 @@
 
   and `kin-render` runs a form into a string instead of the current sink, so
   an expression can be composed while a statement is emitted."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [clojure.set]))
 
 ;; --------------------------------------------------------------- the context
 
@@ -217,6 +218,118 @@
                          a (or referred []))))))
          {:scope {} :shadowed {}} reqs)]
     (with-meta (:scope result) {:kin/shadowed (:shadowed result)})))
+
+(defn require-specs
+  "The `:require` specs of an `ns` form, each normalised to a vector."
+  [ns-form]
+  (->> (rest ns-form)
+       (filter (fn [f] (and (seq? f) (= :require (first f)))))
+       (mapcat rest)
+       (mapv (fn [spec] (if (vector? spec) spec [spec])))))
+
+(defn ns-options
+  "The `ns` form's attribute map -- `{:kin/only #{...}}`, `{:kin/exclude ...}`.
+
+  At most one. Two attribute maps are refused rather than merged: the two
+  keys are ALTERNATIVES, and a reader who writes both has said two things
+  that a merge would quietly reconcile into a third."
+  [ns-form]
+  (let [maps (filter map? (drop 2 ns-form))]
+    (when (< 1 (count maps))
+      (throw (ex-info (str "kin: " (second ns-form) " has "
+                           (count maps) " attribute maps. `:kin/only` and"
+                           " `:kin/exclude` are alternatives -- put the one"
+                           " you mean in a single map.")
+                      {:namespace (second ns-form) :maps (vec maps)})))
+    (or (first maps) {})))
+
+;; ------------------------------------------------------- target selection
+;;
+;; WHICH TARGETS A SOURCE GENERATES FOR is a computation, not a lookup, and
+;; the whole of it is here:
+;;
+;;     (intersection (targets of every required vocabulary))
+;;       minus  :kin/exclude
+;;       intersected with  :kin/only  (when given)
+;;
+;; A source generates for exactly that set and no other. A target named in
+;; `:kin/only` that some required vocabulary cannot speak is an ERROR naming
+;; the vocabulary and the target, because silence and success have to be
+;; distinguishable -- that rule has cost this project four separate bugs.
+
+(defn target-report
+  "Everything there is to say about which targets a source generates for.
+
+      :required   the vocabularies it required, in order
+      :spoken     what each of them can speak
+      :common     the intersection -- what they can ALL speak
+      :only       the `:kin/only` set, or nil
+      :exclude    the `:kin/exclude` set, or nil
+      :targets    the effective set: what this source generates for
+      :ruled-out  {target [reason ...]} for every target some vocabulary
+                  speaks but this source does not generate for
+
+  `:ruled-out` is the reason this returns a report rather than a set. `kin
+  targets` has to answer not just which sources generate for a target but,
+  for those that do not, WHICH vocabulary or exclusion ruled it out -- and
+  that is knowable here and nowhere later."
+  [ns-form vocabs]
+  (let [specs (require-specs ns-form)
+        required (mapv first specs)
+        _ (doseq [v required]
+            (when-not (get vocabs v)
+              (throw (ex-info (str "kin: no vocabulary " v)
+                              {:required v :known (vec (keys vocabs))}))))
+        spoken (into {} (map (fn [v] [v (:targets (get vocabs v))])) required)
+        all (reduce into #{} (vals spoken))
+        common (if (seq spoken)
+                 (reduce clojure.set/intersection (vals spoken))
+                 all)
+        opts (ns-options ns-form)
+        only (:kin/only opts)
+        exclude (:kin/exclude opts)]
+    ;; `:kin/only` asking for a target no vocabulary here can speak is the
+    ;; error the redesign singles out: a silent omission would generate two
+    ;; files where the source asked for three, and nothing would say so.
+    (doseq [t (or only [])]
+      (when-not (contains? common t)
+        (let [mute (mapv key (remove (fn [[_ ts]] (contains? ts t)) spoken))]
+          (throw (ex-info
+                  (str "kin: " (second ns-form) " asks for " t " in `:kin/only`"
+                       ", but " (str/join ", " (map str mute))
+                       (if (= 1 (count mute)) " cannot speak it" " cannot speak it")
+                       ". A vocabulary generates for what it says it can say.")
+                  {:namespace (second ns-form) :target t :mute mute
+                   :spoken spoken})))))
+    (let [targets (cond-> common
+                    exclude (#(reduce disj % exclude))
+                    only (#(clojure.set/intersection % (set only))))
+          ruled-out
+          (into {}
+                (for [t all :when (not (contains? targets t))]
+                  [t (vec (concat
+                           (for [[v ts] spoken :when (not (contains? ts t))]
+                             (str v " cannot speak it"))
+                           (when (and exclude (contains? (set exclude) t))
+                             [":kin/exclude"])
+                           (when (and only (not (contains? (set only) t)))
+                             [":kin/only does not name it"])))]))]
+      (when (empty? targets)
+        (throw (ex-info
+                (str "kin: " (second ns-form) " generates for NO target."
+                     " Its vocabularies have no target in common"
+                     (when (or only exclude) ", or the ns form ruled the rest out")
+                     ". A source that generates nothing is a source nothing"
+                     " checks.")
+                {:namespace (second ns-form) :spoken spoken
+                 :only only :exclude exclude})))
+      {:required required :spoken spoken :common common
+       :only only :exclude exclude :targets targets :ruled-out ruled-out})))
+
+(defn effective-targets
+  "Which targets this source generates for. See `target-report`."
+  [ns-form vocabs]
+  (:targets (target-report ns-form vocabs)))
 
 (defn shadowed
   "What each symbol in a require scope shadows: `{sym [[vocab k] ...]}`.
