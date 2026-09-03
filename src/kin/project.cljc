@@ -28,7 +28,14 @@
 
       {:vocabularies {'my.vocab {...}}       ; name -> vocabulary
        :targets      {:rust {...}}           ; key  -> target descriptor
-       :target-order [:rust :java :csharp]}  ; how a report lists them
+       :target-order [:rust :java :csharp]   ; how a report lists them
+       :sources      {:vfs ... :match `*.kin`}}
+
+  TWO KINDS OF VFS, doing different jobs. The SOURCE vfs scans and reads --
+  it is the only one that ever lists. Each TARGET's vfs reads and writes its
+  destinations and never lists. Giving the sources one is what turns `why`
+  and `targets-report` from commands that glob a real tree into functions
+  over a config, which is the only reason they can be tested at all.
 
   `project` builds one from vocabularies you already have. `load-project`
   is the convenience that resolves them from namespace names, and it is the
@@ -46,12 +53,13 @@
   Pure, and the reason `generate` can be. Nothing here loads a namespace or
   opens a file; a caller that has its vocabularies as values -- a test, a
   browser, a build that already required them -- never touches the loader."
-  [{:keys [vocabularies targets target-order]}]
+  [{:keys [vocabularies targets target-order sources]}]
   (let [vocabs (into {} (map (fn [v] [(:namespace (sp/check-vocabulary v)) v]))
                      vocabularies)]
     {:vocabularies vocabs
      :targets (or targets {})
-     :target-order (vec (or target-order (keys targets)))}))
+     :target-order (vec (or target-order (keys targets)))
+     :sources sources}))
 
 #?(:clj
    (defn load-vocabulary
@@ -84,10 +92,62 @@
 
      The one function here that needs a host with `require` in it, kept apart
      from `project` for that reason."
-     [{:keys [vocabularies targets target-order]}]
+     [{:keys [vocabularies targets target-order sources]}]
      (project {:vocabularies (mapv load-vocabulary vocabularies)
                :targets targets
-               :target-order target-order})))
+               :target-order target-order
+               :sources sources})))
+
+;; ------------------------------------------------------------- the sources
+;;
+;; SCANNING IS THE LIBRARY'S JOB NOW. It used to live in the consumer's shell
+;; -- `for src in kin/*.kin` appeared in flint's check-kin and in three
+;; wrapper scripts -- so every consumer reimplemented the same three lines and
+;; got to reimplement the ordering and the error handling with them.
+
+(defn source-label
+  "What to CALL the source at vfs path `p`.
+
+  The source vfs is rooted at the source directory, so it answers
+  `champ.kin`; the marker in every host file says `kin/champ.kin`, because
+  that convention predates the vfs and is written into three runtimes. A
+  `:label` on `:sources` bridges the two, and defaults to identity for a
+  project with no such history."
+  [prj p]
+  (if-let [f (:label (:sources prj))] (f p) p))
+
+(defn source-path
+  "The vfs path for a label -- `source-label` backwards.
+
+  A project that labels its sources has to be able to take one back, because
+  a person on a command line types the label they see in the marker."
+  [prj label]
+  (if-let [f (:unlabel (:sources prj))] (f label) label))
+
+(defn source-text
+  "One source's text, read through the source vfs. Takes a LABEL."
+  [prj label]
+  (vfs/-read (:vfs (:sources prj)) (source-path prj label)))
+
+(defn source-labels
+  "Every source in the project, sorted.
+
+  Sorted rather than in the vfs's order, because a listing's order is the
+  filesystem's and a report that reorders between two runs of an unchanged
+  tree is much harder to read than one that does not."
+  [prj]
+  (let [{:keys [vfs match]} (:sources prj)]
+    (when-not vfs
+      (throw (ex-info (str "kin: this project has no `:sources` vfs, so it"
+                           " cannot be asked what its sources are. Give it"
+                           " `{:sources {:vfs ... :match \"*.kin\"}}`.")
+                      {})))
+    (mapv (partial source-label prj) (vfs/listing vfs match))))
+
+(defn sources
+  "`{label text}` for every source, in sorted order."
+  [prj]
+  (into (sorted-map) (map (fn [l] [l (source-text prj l)])) (source-labels prj)))
 
 ;; ---------------------------------------------------------------- analysis
 
@@ -222,36 +282,141 @@
         ls (if (= "" (last ls)) (butlast ls) ls)]
     (mapv (fn [l] (if (= "" l) l (str pad l))) ls)))
 
+(defn- stage
+  "Phases 1 and 2 of an emit: generate everything, splice everything, in
+  memory. Writes nothing.
+
+  Answers `{:emitted {label [{:target :path}]} :staged [{...}]}` where each
+  staged entry holds the destination's ORIGINAL content and its next content,
+  which is all the rollback data phase 3 can need. That data is free: splicing
+  a region requires reading the whole destination anyway, so nothing is read
+  twice and no snapshot is taken.
+
+  EVERY REGION BOUND FOR A DESTINATION IS APPLIED IN ONE PASS. A destination
+  may be written by more than one source -- flint had nine emitting into
+  `map.rs` -- and doing it read-modify-write per source is wrong in a way that
+  only shows on failure: emit A into `map.rs`, emit B into it, then let C
+  fail, and `the original` to roll back to is whichever copy the last read
+  saw, which is the tree with A already in it. Accumulate first, write once,
+  and the question does not arise."
+  [prj entries]
+  (let [plans (mapv (fn [{:keys [label text]}]
+                      (let [a (analyse prj text label)]
+                        {:label label :ns-name (:ns-name a)
+                         :emit-for (:emit-for a)
+                         ;; PHASE 1. A form not in scope or an undeclared
+                         ;; constant throws here, having written nothing.
+                         :generated (generate prj text label)}))
+                    entries)
+        regions (for [p plans
+                      t (:emit-for p)
+                      :let [d (destination prj t (:ns-name p))]]
+                  {:label (:label p) :target t :vfs (first d) :path (second d)
+                   :text (get (:generated p) t)
+                   :indent (indent-for prj t (:ns-name p))})
+        by-dest (group-by (juxt :target :path) (filter :path regions))]
+    {:emitted (reduce (fn [m r] (update m (:label r) (fnil conj [])
+                                        {:target (:target r) :path (:path r)}))
+                      {} regions)
+     ;; PHASE 2. A missing marker throws here, still having written nothing.
+     :staged (mapv (fn [[[target path] rs]]
+                     (let [fs (:vfs (first rs))]
+                       (when-not (vfs/-exists? fs path)
+                         (throw (ex-info
+                                 (str "kin: " target " sends "
+                                      (str/join ", " (map :label rs)) " to "
+                                      path ", which does not exist. A region"
+                                      " is written INTO a hand-written file,"
+                                      " so the file and its markers come"
+                                      " first.")
+                                 {:target target :path path})))
+                       (let [original (vfs/-read fs path)]
+                         {:vfs fs :target target :path path :original original
+                          :next (reduce (fn [c r]
+                                          (splice c (:label r)
+                                                  (block-lines (:text r) (:indent r))
+                                                  path))
+                                        original rs)})))
+                   (sort-by (comp str first) by-dest))}))
+
+(defn- write-staged!
+  "Phase 3: write, and put everything back if a write fails partway."
+  [staged]
+  (loop [done [] todo staged]
+    (if-let [{:keys [vfs path next] :as one} (first todo)]
+      (let [err (try (vfs/-write vfs path next) nil
+                     (catch #?(:clj Exception :default :default) e e))]
+        (if err
+          ;; ROLLBACK. `-write` with content already in hand -- no new
+          ;; protocol operation, no temp paths, no `-delete`. That the design
+          ;; needs no wider protocol is evidence the three operations were
+          ;; the right three.
+          (let [failed (reduce (fn [acc {:keys [vfs path original]}]
+                                 (try (vfs/-write vfs path original) acc
+                                      (catch #?(:clj Exception :default :default) _
+                                        (conj acc path))))
+                               [] done)]
+            (if (seq failed)
+              ;; A restore that fails silently leaves a tree that is neither
+              ;; state AND no record of which files are which -- strictly
+              ;; worse than the failure it was undoing, because the next
+              ;; run's drift check reports it without saying why.
+              (throw (ex-info
+                      (str "kin: emit failed at " path ", AND THE ROLLBACK"
+                           " DID NOT COMPLETE. These hold NEW content: "
+                           (pr-str failed) ". These were restored: "
+                           (pr-str (vec (remove (set failed) (map :path done))))
+                           ". Every other destination holds its original.")
+                      {:failed-write path :not-restored failed}
+                      #?(:clj err)))
+              (throw (ex-info
+                      (str "kin: emit failed at " path " -- the whole batch"
+                           " was reverted, so the tree is exactly as it was.")
+                      {:failed-write path
+                       :reverted (vec (map :path done))}
+                      #?(:clj err)))))
+          (recur (conj done one) (rest todo))))
+      (vec (map (juxt :target :path) done)))))
+
+(defn emit-sources!
+  "Emit a batch of `{:label :text}` entries. ATOMIC: every source, every
+  target, or nothing.
+
+  Three phases -- generate, splice, write -- and the first two write nothing,
+  so anything that can be detected before touching a destination is. A write
+  that fails partway restores the originals it already replaced.
+
+  The wider granularity beats per-source recovery for three reasons: a
+  partial tree is a state nobody designed and no gate describes; recovery
+  becomes `fix and re-run` with nothing to reason about; and the invariant
+  this whole project exists to hold is that the runtimes AGREE, which a
+  half-emitted run breaks on purpose."
+  [prj entries]
+  (let [{:keys [emitted staged]} (stage prj entries)]
+    (write-staged! staged)
+    emitted))
+
 (defn emit!
-  "Write a source's output into each target's file, between the markers.
+  "Emit ONE source, atomically over its targets.
 
-  THE ONLY I/O KIN PERFORMS, and all of it through the vfs the user put on
-  the target. Answers what it did: `[{:target :rust :path \"...\"} ...]`, with
-  `:path` nil for a target that generates and is written nowhere.
-
-  The marker is `label` -- the source path, which is what every host file
-  already says."
+  Answers `[{:target :rust :path \"...\"} ...]`, with `:path` nil for a target
+  that generates and is written nowhere."
   [prj text label]
-  (let [a (analyse prj text label)
-        ns-name (:ns-name a)
-        generated (generate prj text label)]
-    (vec
-     (for [target (:emit-for a)]
-       (if-let [[fs path] (destination prj target ns-name)]
-         (do
-           (when-not (vfs/-exists? fs path)
-             (throw (ex-info
-                     (str "kin: " target " sends " ns-name " to " path
-                          ", which does not exist. A region is written INTO a"
-                          " hand-written file, so the file and its markers"
-                          " come first.")
-                     {:target target :namespace ns-name :path path})))
-           (let [content (vfs/-read fs path)
-                 block (block-lines (get generated target)
-                                    (indent-for prj target ns-name))]
-             (vfs/-write fs path (splice content label block path))
-             {:target target :path path}))
-         {:target target :path nil})))))
+  (get (emit-sources! prj [{:label label :text text}]) label))
+
+(defn emit-all!
+  "Emit EVERY source in the project, atomically over the whole batch.
+
+  `{:order [label ...] :emitted {label [{:target :path}]}}`. There is no
+  `:failed` key: a batch either happens or does not, so a failure is thrown
+  rather than reported per source. The order is `source-labels`, which is
+  sorted -- all-or-nothing means order cannot affect the RESULT, but it can
+  still affect a failure message, and one whose lines move between runs is
+  much harder to read."
+  [prj]
+  (let [labels (source-labels prj)
+        entries (mapv (fn [l] {:label l :text (source-text prj l)}) labels)]
+    {:order labels :emitted (emit-sources! prj entries)}))
 
 (defn destinations
   "Every `[target path]` this project would write, given `sources`.
@@ -259,16 +424,17 @@
   `sources` is `{label text}`. A gate needs this: a project that commits its
   generated code has to re-emit everything and compare, and the list of what
   to compare is not knowable any other way once destination is a function."
-  [prj sources]
+  ([prj] (destinations prj (sources prj)))
+  ([prj srcs]
   (vec (sort-by (comp str second)
                 (distinct
-                 (for [[label text] sources
+                 (for [[label text] srcs
                        :let [a (try (analyse prj text label) (catch #?(:clj Exception :default :default) _ nil))]
                        :when a
                        t (:emit-for a)
                        :let [d (destination prj t (:ns-name a))]
                        :when d]
-                   [t (second d)])))))
+                   [t (second d)]))))))
 
 ;; --------------------------------------------------------------------- why
 ;;
@@ -354,7 +520,8 @@
   shape. A RENDER THAT THROWS still answers -- `why` is the report you reach
   for BECAUSE generation broke, so the failure is recorded and the tables are
   built from however far it got."
-  [prj text label]
+  ([prj label] (why prj (source-text prj label) label))
+  ([prj text label]
   (let [{:keys [forms scope report emit-for ns-name]} (analyse prj text label)
         ctx (assoc (sp/context {} (first emit-for))
                    :vocabs (:vocabularies prj) :scope-syms scope
@@ -388,7 +555,7 @@
      :named (into #{} (filter named) local)
      :bound (into #{} (comp (remove declared) (remove named) (filter bound)) local)
      :nowhere (into #{} (comp (remove declared) (remove named) (remove bound)) local)
-     :shadowed (sp/shadowed scope)}))
+     :shadowed (sp/shadowed scope)})))
 
 (defn targets-report
   "Every target, and for each which sources reach it and what ruled out the
@@ -403,9 +570,10 @@
   Reasons are GROUPED because a target no vocabulary speaks rules out every
   source for the same reason, and sixteen identical lines say that worse than
   one line naming sixteen sources."
-  [prj sources]
+  ([prj] (targets-report prj (sources prj)))
+  ([prj srcs]
   (let [order (:target-order prj)
-        analysed (into {} (for [[label text] sources]
+        analysed (into {} (for [[label text] srcs]
                             [label (try {:ok (analyse prj text label)}
                                         (catch #?(:clj Exception :default :default) e
                                           {:error #?(:clj (ex-message e) :default (str e))}))]))
@@ -431,4 +599,4 @@
                             (when-not (some #{t} order)
                               ["this project has no target description for it"])
                             ["?"])))
-                    out)}])))}))
+                    out)}])))})))

@@ -118,6 +118,92 @@
                                    {"thing.rs" "// kin:begin thing.kin\n"}))
                     src-text "thing.kin"))
 
+;; ---------------------------------------------------------------------------
+;; ATOMICITY. A batch either happens or does not.
+
+(def other-source
+  "(ns demo.other (:require [demo :refer [defn return I32 Rt]]))
+   (defn ^:method ^I32 half [^Rt rt ^I32 a] (return a))")
+
+(defn two-file-project [fs]
+  (kp/project {:vocabularies [vocabulary]
+               :target-order [:rust]
+               :targets {:rust (merge kin.target/rust
+                                      {:vfs fs
+                                       ;; BOTH namespaces go to the SAME file,
+                                       ;; which is the case that catches a
+                                       ;; per-source read-modify-write.
+                                       :path (fn [_] "thing.rs")
+                                       :indent 4})}}))
+
+;; Two sources into ONE destination. Doing this per source would read the file
+;; twice, and the second read would see the first source's output -- so a
+;; later failure would `roll back` to a tree that already had A in it.
+(let [two-region (str "impl Rt {\n"
+                      "    // kin:begin a.kin\n    old\n    // kin:end a.kin\n"
+                      "    // kin:begin b.kin\n    old\n    // kin:end b.kin\n"
+                      "}\n")
+      fs (vfs/memory-vfs {"thing.rs" two-region})
+      _ (kp/emit-sources! (two-file-project fs)
+                          [{:label "a.kin" :text src-text}
+                           {:label "b.kin" :text other-source}])
+      written (get (vfs/files fs) "thing.rs")]
+  (is "7. two sources into one destination both land"
+      [true true]
+      [(str/includes? written "fn twice(") (str/includes? written "fn half(")])
+  (is "7. and neither clobbered the other's region" false
+      (str/includes? written "old")))
+
+;; THE ATOMICITY CLAIM. One good source, one whose destination has no marker.
+;; The good one must not be written -- not `written and then reverted`, but
+;; indistinguishable from never having run.
+(let [good-host (str "// kin:begin a.kin\nold\n// kin:end a.kin\n")
+      fs (vfs/memory-vfs {"good.rs" good-host "bad.rs" "no markers here\n"})
+      prj (kp/project {:vocabularies [vocabulary]
+                       :target-order [:rust]
+                       :targets {:rust (merge kin.target/rust
+                                              {:vfs fs
+                                               :path (fn [ns-name]
+                                                       (if (= 'demo.thing ns-name)
+                                                         "good.rs" "bad.rs"))})}})
+      err (try (kp/emit-sources! prj [{:label "a.kin" :text src-text}
+                                      {:label "b.kin" :text other-source}])
+               nil
+               (catch Exception e (ex-message e)))]
+  (is "8. the batch refused" true (boolean err))
+  (is "8. and the GOOD destination is untouched" good-host
+      (get (vfs/files fs) "good.rs"))
+  (is "8. and the bad one is untouched too" "no markers here\n"
+      (get (vfs/files fs) "bad.rs")))
+
+;; A write that fails PARTWAY is the harder case: some destinations are
+;; already replaced. Everything must go back.
+(let [good-host (str "// kin:begin a.kin\nold\n// kin:end a.kin\n")
+      other-host (str "// kin:begin b.kin\nold\n// kin:end b.kin\n")
+      backing (atom {"one.rs" good-host "two.rs" other-host})
+      exploding (reify vfs/Vfs
+                  (-exists? [_ p] (contains? @backing p))
+                  (-read [_ p] (get @backing p))
+                  (-write [_ p c]
+                    (if (= p "two.rs")
+                      (throw (ex-info "disk full" {}))
+                      (do (swap! backing assoc p c) nil))))
+      prj (kp/project {:vocabularies [vocabulary]
+                       :target-order [:rust]
+                       :targets {:rust (merge kin.target/rust
+                                              {:vfs exploding
+                                               :path (fn [ns-name]
+                                                       (if (= 'demo.thing ns-name)
+                                                         "one.rs" "two.rs"))})}})
+      err (try (kp/emit-sources! prj [{:label "a.kin" :text src-text}
+                                      {:label "b.kin" :text other-source}])
+               nil (catch Exception e (ex-message e)))]
+  (is "9. a write failing partway is reported" true (boolean err))
+  (is "9. and says the batch was reverted"
+      true (boolean (and err (str/includes? err "reverted"))))
+  (is "9. and the already-written destination went back"
+      good-host (get @backing "one.rs")))
+
 ;; And the claim this file is really making.
 (println)
 (println "  (no directory was created, opened, or written by any of the above)")

@@ -22,17 +22,39 @@
     -read     the host file, whose hand-written parts kin preserves
     -write    it back with the region replaced
 
-  Deliberately absent: listing, deleting, creating directories, statting.
+  Deliberately absent from `Vfs`: deleting, creating directories, statting.
   kin writes INTO files a person already wrote -- a region lives between
   markers in hand-written code -- so it never creates one, and a protocol
   with three operations is easier to implement for a new host than one with
-  eight. A protocol grows more easily than it shrinks."
+  eight. A protocol grows more easily than it shrinks.
+
+  ## Listing is a SECOND protocol, and that was a choice
+
+  A SOURCE vfs scans and reads; a DESTINATION vfs reads and writes. Only the
+  source ever lists, which C5 posed as a question: one protocol whose `-list`
+  a destination may refuse, or two protocols?
+
+  TWO, as `Vfs` plus a `Listing` capability. A destination that must
+  implement `-list` in order to refuse it is a lie in its own type -- the
+  protocol says it can and the implementation says it cannot, and the
+  disagreement surfaces at call time rather than at construction. With two,
+  `(satisfies? Listing x)` is an honest question with an answer, and a host
+  implements whichever half it actually has.
+
+  The usual objection to splitting -- that implementors now write two things
+  -- does not arise: `MemoryVfs` and `DiskVfs` below each satisfy both in one
+  record, because being listable and being writable are not exclusive. What
+  the split buys is the ability to be one without the other, which is exactly
+  what a target's destination is."
   (:require [clojure.string :as str]))
 
 (defprotocol Vfs
   (-exists? [this path] "Is there something at `path`?")
   (-read [this path] "The contents of `path`, as a string.")
   (-write [this path content] "Put `content` at `path`."))
+
+(defprotocol Listing
+  (-list [this] "Every path this holds, in no particular order."))
 
 ;; ------------------------------------------------------------------ memory
 
@@ -43,7 +65,9 @@
     (or (get @files path)
         (throw (ex-info (str "kin.vfs: nothing at " (pr-str path))
                         {:path path :known (vec (sort (keys @files)))}))))
-  (-write [_ path content] (swap! files assoc path content) nil))
+  (-write [_ path content] (swap! files assoc path content) nil)
+  Listing
+  (-list [_] (vec (keys @files))))
 
 (defn memory-vfs
   "A vfs that is a map. `(memory-vfs {\"a.rs\" \"...\"})`.
@@ -67,7 +91,16 @@
      Vfs
      (-exists? [_ path] (.exists (java.io.File. (str root "/" path))))
      (-read [_ path] (slurp (str root "/" path)))
-     (-write [_ path content] (spit (str root "/" path) content) nil)))
+     (-write [_ path content] (spit (str root "/" path) content) nil)
+     Listing
+     ;; One level, not a walk. A source directory of `.kin` files is what
+     ;; this is for, and a recursive listing is a thing to add when something
+     ;; needs it rather than a thing to guess at.
+     (-list [_]
+       (let [d (java.io.File. (str root))]
+         (if (.isDirectory d)
+           (vec (for [f (.listFiles d) :when (.isFile f)] (.getName f)))
+           [])))))
 
 #?(:clj
    (defn disk-vfs
@@ -94,3 +127,31 @@
                      :default (throw (ex-info "kin.vfs: no disk vfs on this host"
                                               {:root v})))
       :else v)))
+
+;; ------------------------------------------------------------------ globs
+
+(defn matches?
+  "Does `path` match `pattern`?
+
+  A DELIBERATELY TINY GLOB: `*.kin`, `*` and an exact name, and nothing else.
+  A source directory needs `*.kin` and kin should not carry a glob engine to
+  say so -- a project wanting more can filter the listing itself, since it is
+  an ordinary sequence."
+  [pattern path]
+  (cond
+    (or (nil? pattern) (= "*" pattern)) true
+    (str/starts-with? pattern "*") (str/ends-with? path (subs pattern 1))
+    :else (= pattern path)))
+
+(defn listing
+  "Every path in `vfs` matching `pattern`, SORTED.
+
+  Sorted because a directory listing's order is the filesystem's, and a
+  report that reorders between two runs of the same tree is much harder to
+  read than one that does not. Ordering is cheap; comparability is not."
+  ([vfs] (listing vfs nil))
+  ([vfs pattern]
+   (when-not (satisfies? Listing vfs)
+     (throw (ex-info "kin.vfs: this vfs cannot list -- it is a destination"
+                     {:vfs (type vfs)})))
+   (vec (sort (filter (partial matches? pattern) (-list vfs))))))

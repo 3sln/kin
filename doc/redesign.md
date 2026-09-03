@@ -378,6 +378,23 @@ any unit kin fully owns; keep splicing available for units it does not, and
 name it as scaffolding. Do not delete splicing until the port is finished,
 because deleting it stops the port.
 
+> **NOT IMPLEMENTED, and deliberately.** Two things block it and neither is
+> mine to decide:
+>
+> * **`:wrap` is still unanswered.** Whole-file generation makes `:wrap`
+>   supply the `package` line, the class, the `using`s and every import --
+>   which is a much larger job than the indent it supplies today, and the
+>   question of whether `:wrap` owns surrounding TEXT at all is the one
+>   already open in `doc/decisions.md`. Building whole-file first would be
+>   answering it by accident.
+> * **Java needs a class per unit**, which changes every call site in the
+>   hand-written Java. That is a decision about the runtime's shape, not
+>   about kin.
+>
+> The recommendation itself is adopted in the docs: regions are named as
+> SCAFFOLDING with a defined end rather than a permanent feature, which is
+> what the tree was already doing without saying so.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:

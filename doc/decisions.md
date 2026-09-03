@@ -17,6 +17,8 @@ lost is still the argument a future reader will re-invent.
 | B | tag dispatch shape | **DISSOLVED** by correction C1 — not kin's question |
 | C | unknown-tag behaviour | **DISSOLVED** by correction C1 — not kin's question |
 | D | does a tag subsume `u<`/`uquot`? | **ANSWERED by the work** — partly; the six stay |
+| E | one vfs protocol or two? | **DECIDED** — two: `Vfs`, plus a `Listing` capability |
+| F | what a tree-wide `emit-all!` does with a failure | **OVERRULED** — the whole batch reverts |
 
 ---
 
@@ -216,6 +218,91 @@ What actually changed is which one is the default. `<` is now correct for
 tagged values without anyone remembering, and `u<` is the explicit escape
 hatch rather than the only route. That is a smaller win than "six forms
 collapse into two", and it is the true one.
+
+## E — Two vfs protocols, not one with a refusable operation
+
+C5 asked it directly: a SOURCE vfs scans and reads, a DESTINATION vfs reads
+and writes, and only the source ever lists — so is it one protocol whose
+`-list` a destination may refuse, or two?
+
+**Two: `Vfs` (`-exists?`, `-read`, `-write`) and a separate `Listing`
+capability (`-list`).**
+
+A destination that must implement `-list` in order to refuse it is a lie in
+its own type. The protocol says it can, the implementation says it cannot,
+and the two disagree at call time rather than at construction — which is the
+same shape as a template lookup returning nil deep in a render, the failure
+`:targets` was added to remove. With two protocols, "can this list?" is
+`(satisfies? Listing x)`: a question with an answer, before anything runs.
+
+The usual cost of splitting a protocol is that implementors write two things.
+It does not arise here: `MemoryVfs` and `DiskVfs` each satisfy both in one
+record, because being listable and being writable are not exclusive. What the
+split buys is the ability to be one *without* the other, which is exactly what
+a target's destination is.
+
+## F — What a tree-wide emit does with a failure
+
+### OVERRULED. The whole batch reverts.
+
+The author, in two steps — first that a source whose targets do not all
+succeed must be reverted, then:
+
+> Actually, if *any* emission fails maybe we should revert the full batch?
+
+Yes, and the wider granularity is better for reasons the decision below did
+not weigh:
+
+* **A partial tree is a state nobody designed and no gate describes.** With
+  eight of sixteen sources emitted, `check-kin` reports the other eight as
+  drifted — which is true, and says nothing about what happened.
+* **Recovery becomes trivial**: fix, re-run, with nothing to reason about.
+* **The invariant this project exists to hold is that the runtimes AGREE**,
+  and a half-emitted run is the one state that breaks it on purpose.
+
+**It also made the implementation simpler.** Three phases — generate every
+target of every source into memory, splice each destination once, then write
+— and the first two write nothing, so everything detectable before touching a
+destination is detected there. The rollback data is free: splicing requires
+reading the whole destination anyway, so phase 2 already holds every original.
+Nothing is read twice and no snapshot is taken. And rollback is `-write` with
+content already in hand, so **the protocol did not have to grow** — no
+`-delete`, no temp paths. A design change that needs no wider protocol is
+evidence the three operations in decision E were the right three.
+
+One consequence that is easy to miss, and is now tested: **a destination may
+be written by more than one source**, so all its regions are accumulated and
+spliced in ONE pass. Read-modify-write per source is wrong in a way that only
+shows on failure — emit A into `map.rs`, emit B into it, let C fail, and "the
+original" to restore is whichever copy the last read saw, which is the tree
+with A already in it.
+
+If the rollback itself fails, the error names exactly which destinations hold
+new content and which hold old. A restore that fails silently leaves a tree
+that is neither state and no record of which files are which — strictly worse
+than the failure it was undoing.
+
+### The original decision, kept for the record
+
+> **Continue, and report**: `{:emitted ... :failed ...}`, and the caller
+> decides the exit code. You learn about every broken source in one run
+> rather than one per run; and stopping does not avoid a half-written tree,
+> since a run that stopped at the third leaves three emitted and the rest
+> stale.
+
+The first half was right about reporting and wrong about what to report: with
+atomicity there is no partial result to describe, so a failure is thrown and
+the tree is exactly as it was. The second half — "stopping does not avoid a
+half-written tree" — was an argument against *stopping*, and I read it as an
+argument for *continuing*, when it was really an argument for neither.
+
+I had also written that atomicity "belongs in the vfs, which is the layer that
+knows what a transaction would mean". That was wrong: staging in memory needs
+nothing from the vfs beyond the three operations it already had.
+
+**The order is still sorted.** All-or-nothing means order cannot affect the
+result, but it can still affect a failure message, and one whose lines move
+between runs is harder to read.
 
 ## What kin owes, after both corrections
 

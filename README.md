@@ -204,7 +204,14 @@ distinguishable.
 
 ## 6. Regions, and why generated code is committed
 
-`kin emit` writes **between markers** in a hand-written file:
+> **Regions are SCAFFOLDING with a defined end.** The design they are heading
+> for is one namespace to one whole file, which deletes the markers, the
+> splice, the region parser and the indent arithmetic. Splicing exists because
+> a port arrives a function at a time and you cannot generate half a file —
+> so a unit keeps its regions until kin owns it entirely, and the last region
+> deleted is the end of the port.
+
+`emit!` writes **between markers** in a hand-written file:
 
 ```rust
 // kin:begin kin/hash.kin
@@ -223,6 +230,11 @@ survives until someone re-emits, and a vocabulary change silently makes every
 committed region stale. **A project committing generated code needs a gate
 that re-emits everything and compares.** `kin.project/destinations` answers
 every `[target path]` the project would write, for exactly that purpose.
+
+`emit-all!` is **atomic over the whole batch** — every source, every target,
+or nothing. Three phases: generate into memory, splice each destination once,
+then write, restoring the originals if a write fails partway. A partial tree
+is a state nobody designed and no gate describes.
 
 ## 7. kin is a library, not a command
 
