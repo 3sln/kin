@@ -1,3 +1,73 @@
+# OPEN QUESTIONS
+
+Five, in the order they should be answered. The first is the sharpest because
+a concrete constraint rules out the obvious reading.
+
+## 1. What does `declare-form!` carry?
+
+Described as "an indirecting placeholder that gets filled later". **kin cannot
+do that for call sites.** `kin/render` collapses a form to a STRING
+immediately; anchors survive only in SINK position, because `resolve-sink`
+walks sink items at join time and a rendered expression is text by then. So an
+inline `(coll-assoc rt ...)` cannot be a hole filled later.
+
+Two designs survive:
+
+* **(A) the declaration carries the SIGNATURE.** C-style: enough to emit the
+  call, with `define-form!` supplying the body later. One pass, errors where
+  they are written. Costs a restated signature, so `define-form!` must check
+  it agrees with any prior `declare-form!` and refuse if not.
+* **(B) `defn` defers its BODY into an anchor.** Bodies are statement
+  position, so anchors work. Every definition registers as the file is walked
+  and bodies resolve at join with everything present -- no `declare-form!`
+  needed at all. Costs diagnostics: a body error surfaces at join rather than
+  at the form.
+
+Leaning (A), because errors stay local and resolution stays strict where it is
+read. (B) needs no new API, so it deserves explicit rejection rather than
+omission.
+
+## 2. Precedence: locals, imports, shape forms
+
+`form-fn` is requires-first, locals-second, justified by `declare!`'s
+docstring -- "a vocabulary name still wins, so a file cannot quietly redefine
+`let`". Written when requires carried only `let` and `if`.
+
+Once requires carry other modules' function names, that means an imported name
+silently beats your own definition in your own file. No language does that.
+But the obvious inversion breaks the case the rule protects, and C2 already
+lets an earlier require shadow `kin.lang`, so "requires are inviolable" is
+already false.
+
+**Recommendation: a local definition colliding with a referred name is an
+ERROR**, naming both -- not a precedence rule. Either ordering silently
+changes what a symbol means, and this project has been bitten by exactly that
+repeatedly. An error costs one rename and removes the class.
+
+## 3. Layout on the hand-written side
+
+Settled: one module per namespace, generated code in its own subtree. Open:
+what the HAND-WRITTEN side does about it. A `mod` line in `lib.rs` for Rust,
+an `import static` for Java, `partial class` or `using static` for C# -- three
+different edits to files kin does not own. Whether kin generates them, prompts
+for them, or leaves them wholly to a person is undecided.
+
+## 4. The three host functions: expose or port
+
+"Build the mechanism, prove it, then maybe port them." Still maybe.
+`cn-copy-set-val` is 23 lines and needs nothing kin lacks; `bn-new` and
+`cn-set` are similar. Porting them after the mechanism is proven would make
+the external surface ZERO, which is a cleaner proof than three permanent
+exceptions.
+
+## 5. Not a design question: the red `check-kin`
+
+Sixteen sources failing with `kin/gen` printing usage and exiting 2. It looked
+like an in-flight script refactor. Asked twice; not yet answered. Worth not
+closing as "probably fine".
+
+---
+
 # CORRECTIONS FROM THE AUTHOR — these overrule what follows
 
 Two rulings arrived after the first four commits of this work. Both overrule
