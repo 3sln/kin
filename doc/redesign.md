@@ -710,60 +710,70 @@ with anything else in flight.
 > have caught it -- the Clojure compiles, the tests passed, and the output
 > was wrong. Qualify first, rename second.
 
-## C10 — The TARGET should own the call shapes. Today the vocabulary does.
+## C10 — How a namespace records what is callable, inside and out
 
-The author asked how a target defines the way each kind of call is generated
--- the local one and the exported one. Answering it from the code turned up
-something bigger than the question.
+I first wrote this section claiming that `kin.lang` naming `:rust`, `:java` and
+`:csharp` thirty-one times was a failure of the redesign -- that the user still
+had no path to a new language. The author:
 
-**Today the target defines none of it.** `defn` in `kin.lang` builds the
-calling form itself and dispatches on target keys it knows BY NAME:
+> It's fine if the path is to re-implement defn let etc for the target, that's
+> intentional.
+
+So that framing is withdrawn. A vocabulary speaks the languages it speaks; a
+new target brings its own `defn`, `let` and the rest, and the go example
+writing its own `defn-form` is the design working, not a workaround. The
+question underneath was the real one:
+
+> But how does the namespace record what's available for other things to
+> call/invoke within the file, and for external files?
+
+### Within the file: already done
+
+The target's `defn` calls `kin/declare!` with a function that emits the call.
+That goes into the `(:locals ctx)` atom, lives for one file's emission, and is
+consulted by `form-fn` AFTER the require scope. A source can define a helper
+and call it two lines later, and nothing outside the file can see it.
+
+### For external files: a namespace's exports ARE a vocabulary
+
+This is the part that needs building, and it needs almost no new machinery.
+`require-scope` already resolves against a map of `namespace-symbol ->
+vocabulary`, and a vocabulary is just
 
 ```clojure
-(kin/declare-name! ctx recv {:rust "self" :java (str recv) :csharp (str recv)})
+{:namespace 'runtime.merge :targets #{...} :forms {...} :tags {...}}
 ```
 
-`kin/lang.cljc` names `:rust`, `:java` or `:csharp` THIRTY-ONE times. It is not
-a general vocabulary; it is a vocabulary for the three targets that shipped
-first. The go example says so plainly and works around it -- it writes its own
-`defn-form`, because "kin.lang's FORMS speak three languages that are not Go".
+So the export registry's job is to PRODUCE ONE OF THOSE per kin namespace.
+Then requiring `runtime.merge` goes down the identical code path as requiring
+`flint.impl.rt`, first-match-wins and aliasing and `:refer` all work already,
+and `require-scope` needs no change at all.
 
-That is worth stating flatly: **the complaint that started this redesign is not
-yet fixed, only documented.** "If the user wants to extend them to a new
-language, there's no clear path for them" -- and the path today is to
-reimplement `defn`, `let`, `if`, `for` and `case`. The go example is an honest
-demonstration of the problem, not of the solution.
+    within a file   `kin/declare!`  -> (:locals ctx)      one file's emission
+    across files    `kin/export!`   -> a vocabulary       the whole run
 
-### What the answer looks like
+Two registries, two lifetimes, one resolution mechanism that already exists.
 
-`:emit` already establishes the principle one level up: the target owns the
-FILE, and kin sequences. The same principle at form level means the target
-owns the SHAPES, and `kin.lang` sequences:
+### What the target supplies, and what kin supplies
 
-* how a function is DECLARED -- signature, receiver, visibility;
-* how a LOCAL call is spelled -- `self.merge_two(...)`;
-* how an EXTERNAL call is spelled -- `Maps.mergeTwo(...)` plus the import it
-  must register.
+The target's `defn` registers BOTH, at the same moment, because they are two
+shapes of one definition: the local call (`self.merge_two(...)`) and the
+external call (`Maps.mergeTwo(...)` plus the import it registers). Only the
+target can spell either. kin carries the two registries, guarantees exports
+are visible before dependents generate, and shapes neither.
 
-Put those in the target descriptor as functions, beside `:emit`, `:local-name`
-and `:fn-name`, and `kin.lang`'s `defn` stops naming targets: it asks the
-target how to spell the things only the target can know. A fourth language
-then supplies a descriptor instead of rewriting the vocabulary, which is the
-whole point.
+### The one real constraint: an export must derive from the HEAD
 
-### And it answers the original question directly
+C8's scan pass collects exports before generation. For that to be cheap, an
+export must be derivable from a `defn`'s HEAD alone -- its name, tags and
+marks -- without emitting the body. If it needs the body, phase 0 becomes a
+full emission and the run doubles.
 
-The local form and the export are two shapes of one definition, so they are
-two functions on the target descriptor, registered by `defn` at the same
-moment: one into the file-local declarations, one into the namespace's
-exports. kin carries both registries and decides neither shape.
-
-### Scope note
-
-This is larger than C8 and partly underneath it -- C8 cannot register an
-export shape that nothing defines. It is also not a prerequisite for the three
-built-in targets, which work today. Sequence it deliberately rather than
-folding it into C8 by accident.
+That is a constraint on how a target writes its `defn`, and it is worth
+stating as a rule rather than discovering as a performance problem: the export
+form is a function of the SIGNATURE. Everything a caller needs -- the name,
+the arity, the return tag, the import to register -- is in the head. Nothing a
+caller needs is in the body.
 
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
