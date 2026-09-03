@@ -108,7 +108,18 @@
   [ctx k]
   (get (:scope ctx) k))
 
-(defn indent-of [ctx] (apply str (repeat (* 4 (:indent ctx)) " ")))
+(defn indent-of
+  "One level of indentation per enclosing scope, spelled the way THIS TARGET
+  spells one.
+
+  It used to be four spaces, always, which is a fact about three languages
+  rather than about indentation. Go uses tabs and `gofmt` rewrites anything
+  else -- found by writing the worked example in `examples/go`, which is what
+  a worked example is for. A target that says nothing still gets four spaces,
+  so nothing that existed before this changes."
+  [ctx]
+  (let [unit (get-in ctx [:targets (:target ctx) :indent-unit] "    ")]
+    (apply str (repeat (:indent ctx) unit))))
 
 (defn kin-emit!
   "Append to the current sink, or to an ANCHOR.

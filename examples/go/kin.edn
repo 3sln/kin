@@ -1,0 +1,4 @@
+;; A project kin has never heard of. Two lines is the whole of what kin needs
+;; to know: which vocabularies to load, and where each target writes.
+{:vocabularies [example.go]
+ :targets example.targets}

@@ -1,0 +1,18 @@
+;; Euclid, in a language kin has never heard of.
+;;
+;; Nothing in kin knows the word `go`. The target is described in
+;; `src/example/targets.cljc` and the forms in `src/example/go.cljc`, both of
+;; them ordinary files in this example project.
+(ns example.gcd
+  (:require [example.go :refer [defn return let set while comment
+                                != > rem I32]]))
+
+(defn ^I32 gcd [^I32 a ^I32 b]
+  (comment "Euclid's algorithm, by repeated remainder.")
+  (let [x a
+        y b]
+    (while (!= y 0)
+      (let [t (rem x y)]
+        (set x y)
+        (set y t)))
+    (return x)))

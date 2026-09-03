@@ -1,0 +1,8 @@
+;; kin on the classpath directly, rather than as a dependency, because this
+;; example lives inside kin's own tree. A real project writes
+;;
+;;     {:paths ["src"]
+;;      :deps {io.github.3sln/kin {:local/root "../kin"}}}
+;;
+;; and nothing else changes.
+{:paths ["src" "../../src"]}

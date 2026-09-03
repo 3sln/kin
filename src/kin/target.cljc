@@ -14,6 +14,7 @@
     :local-name  (fn [ctx sym] -> String) for a local
     :fn-name     (fn [ctx sym] -> String) for a function
     :reserved    words this language will not accept as an identifier
+    :indent-unit one level of indentation, defaulting to four spaces
     :dest        where this target's files live -- a root path
     :path        (fn [ns] -> String or nil) namespace -> file, under :dest
     :indent      (fn [ns] -> int) how deep the region sits in its file
