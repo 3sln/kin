@@ -411,19 +411,94 @@
     (or (get-in ctx [:vocab head])
         (get (some-> (:locals ctx) deref) head))))
 
+
+;; ------------------------------------------------------------------- tags
+;;
+;; A TAG IS DATA. kin carries one and never interprets it.
+;;
+;; That is the whole of the rule, and it is narrower than it looks. kin has no
+;; dispatch table, no match rules, no notion of what any tag MEANS and no
+;; opinion about whether two tags are compatible. A form receives each
+;; argument as rendered text plus whatever tag it carries and decides for
+;; itself -- including deciding to ignore it, which is what every form in the
+;; tree did before this existed and still does.
+;;
+;; So what kin owes is four things:
+;;
+;;   * a form's product is text plus an optional tag;
+;;   * an enclosing form sees each argument's text and tag;
+;;   * declared tags -- `^I32` on a parameter, a `:tag` on a call, a `defn`
+;;     return -- flow to the products that carry them;
+;;   * an unannotated local may take its tag from its initialiser.
+;;
+;; An implementation here that finds itself asking what a tag means has gone
+;; wrong. `kin.lang` may dispatch however it likes; that is a vocabulary
+;; making a choice about its own forms, and a user who wants a different one
+;; shadows it (see `require-scope`, first match wins).
+
+(defn kin-tagged!
+  "Say that the form now rendering produced `tag`.
+
+  Called by a form implementation about ITS OWN product. kin stores it and
+  hands it to whoever renders this form as an argument; nothing here looks
+  inside it."
+  [ctx tag]
+  (when-let [a (:product ctx)] (reset! a tag))
+  nil)
+
+(defn kin-local-tag
+  "The tag a local was declared or inferred with, or nil."
+  [ctx sym]
+  (get (some-> (:local-tags ctx) deref) sym))
+
+(defn kin-declare-tag!
+  "Record that `sym` -- a parameter, a binding, a loop variable -- has `tag`."
+  [ctx sym tag]
+  (when-let [a (:local-tags ctx)] (swap! a assoc sym tag))
+  nil)
+
+(defn literal-tag
+  "The tag a bare literal carries, asked of the source's vocabularies.
+
+  kin cannot know what tag `5` has, because tags belong to vocabularies and
+  kin has none of its own. So it ASKS: a vocabulary may carry a
+  `:literal-tag`, a `(fn [v] -> tag or nil)`, and the first required
+  vocabulary to answer wins -- the same first-match rule the require scope
+  uses, for the same reason."
+  [ctx v]
+  (some (fn [vname]
+          (when-let [f (get-in ctx [:vocabs vname :literal-tag])] (f v)))
+        (:vocab-order ctx)))
+
+(defn kin-render-tagged
+  "Render `form` and answer BOTH halves of its product: `{:text ... :tag ...}`.
+
+  This is what item 5 exists for. A form that wants to know what its argument
+  IS -- rather than only what it says -- calls this instead of `kin-render`,
+  and gets a tag it may use, ignore, or refuse."
+  [ctx form]
+  (let [product (atom nil)
+        sub (-> ctx
+                (assoc :out (new-sink))
+                (assoc :product product)
+                (assoc-in [:scope :position] :expression))]
+    (dispatch sub form)
+    {:text (resolve-sink (deref (:out sub))) :tag @product}))
+
 (defn kin-render
   "Run `form` into a STRING rather than into the current sink.
 
   Expressions compose; statements emit. A form implementation that needs a
   sub-expression calls this, and one that emits a statement calls
   `kin-emit!` -- which is how one vocabulary serves both positions without
-  the translator deciding which is which."
+  the translator deciding which is which.
+
+  The text half of `kin-render-tagged`. It is defined in terms of it rather
+  than beside it so that a form rendering an argument cannot accidentally
+  report that argument's tag as its OWN product -- which is what happened
+  when the two shared a sub-context."
   [ctx form]
-  (let [sub (-> ctx
-                (assoc :out (new-sink))
-                (assoc-in [:scope :position] :expression))]
-    (dispatch sub form)
-    (resolve-sink (deref (:out sub)))))
+  (:text (kin-render-tagged ctx form)))
 
 (defn kin-position
   "What this form is being compiled AS: `:statement` or `:expression`.
@@ -481,7 +556,14 @@
                              (str " -- this file requires "
                                   (pr-str (vec (sort (map str (keys (:scope-syms ctx))))))))) 
                       {:symbol (first form)})))
-    :else (kin-emit! ctx (literal ctx form))))
+    ;; A LOCAL CARRIES THE TAG IT WAS DECLARED WITH, and a literal whatever
+    ;; the source's vocabularies say its shape implies. Both are recorded as
+    ;; this form's product, so an enclosing form asking `kin-render-tagged`
+    ;; gets an answer for a bare `x` and a bare `5` as well as for a call.
+    :else (do (kin-tagged! ctx (if (symbol? form)
+                                 (kin-local-tag ctx form)
+                                 (literal-tag ctx form)))
+              (kin-emit! ctx (literal ctx form)))))
 
 (defn local-name
   "A local, spelled the way THIS TARGET spells one.

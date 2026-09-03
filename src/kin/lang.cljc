@@ -81,14 +81,18 @@
   "A form that is a call: render the arguments, fill the target's template, and
   emit as a statement or an expression depending on where it sits.
 
+  `(call tmpls {:tag T})` says what the call PRODUCES, which is how a tag
+  reaches an enclosing form. `T` may be a tag or a `(fn [ctx form] -> tag)`.
+
   A target with no template is REFUSED by name. It used to fill `nil`, which
   `fmt` turned into an empty string, so a vocabulary that claimed to speak a
   target and had missed one form emitted a blank where a call should be --
   the same shape of silence `:targets` exists to remove, one level down.
   Tags and names are checked when the vocabulary loads; a form is a function
   and cannot be, so it is checked here, the first time it is asked."
-  [tmpls]
-  (fn [ctx form]
+  ([tmpls] (call tmpls nil))
+  ([tmpls {:keys [tag]}]
+   (fn [ctx form]
     (let [tmpl (or (get tmpls (t ctx))
                    (throw (ex-info
                            (str "kin: `" (first form) "` has no template for "
@@ -102,9 +106,13 @@
                        (if (delimited? tmpl i) (strip-parens c) c)))
                    (rest form)))
           code (fmt tmpl as)]
+      ;; WHAT THIS CALL PRODUCED. `:tag` may be a value or a function of the
+      ;; context, which is the form deciding about its own product -- kin
+      ;; carries the answer and does not read it.
+      (sp/kin-tagged! ctx (if (fn? tag) (tag ctx form) tag))
       (if (= :statement (sp/kin-position ctx))
         (sp/kin-emit! ctx (sp/indent-of ctx) code ";\n")
-        (sp/kin-emit! ctx code)))))
+        (sp/kin-emit! ctx code))))))
 
 ;; THERE IS NO `bit-shift-right` HERE, and its absence is the point.
 ;;
@@ -222,6 +230,12 @@
       (sp/kin-declare!
        ctx nm
        (fn [c f]
+         ;; A GENERATED FUNCTION REGISTERS ITS OWN RETURN TAG. It already
+         ;; states one -- `defn ^Value cn-key` -- so a later call to it in the
+         ;; same file carries that tag with no further annotation. This is the
+         ;; cheapest of the four ways a tag arrives and the one the sources
+         ;; already pay for.
+         (sp/kin-tagged! c (sp/kin-tag c ret))
          ;; Every argument of a call sits between delimiters -- `(`, `,`,
          ;; `)` -- so its outer parentheses can only be noise. This is the
          ;; same rule `delimited?` applies to a template, arrived at from the
@@ -285,7 +299,17 @@
                  (str/join ", " (cons* (when (and recv (not on-inst?))
                                          (str (ty (:tag (meta recv))) " " recv))
                                        (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n"))
-      (let [wrap? (and unchecked? (= :csharp (t ctx)))]
+      (let [wrap? (and unchecked? (= :csharp (t ctx)))
+            ;; A FRESH TAG TABLE PER FUNCTION, seeded with the parameters.
+            ;; Fresh because a table that outlived its function would let a
+            ;; parameter called `n` in one body decide what an unannotated `n`
+            ;; means in the next, which is inference by coincidence.
+            ctx (assoc ctx :local-tags
+                       (atom (into {} (for [[p tag] (cons* (when recv [recv (:tag (meta recv))])
+                                                           ps)
+                                            :let [tv (sp/kin-tag ctx tag)]
+                                            :when tv]
+                                        [p tv]))))]
         (sp/kin-scoped
          ctx {:key :fn :value nm :indent 1}
          (fn [inner]
@@ -300,8 +324,16 @@
   (fn [ctx form]
     (let [[_ bindings & body] form]
       (doseq [[nm init] (partition 2 bindings)]
-        (let [ty (ty-of ctx default (:tag (meta nm)))
-              code (strip-parens (sp/kin-render ctx init))]
+        (let [{code :text produced :tag} (sp/kin-render-tagged ctx init)
+              code (strip-parens code)
+              ;; AN UNANNOTATED LOCAL TAKES THE TAG OF ITS INITIALISER, and
+              ;; only then falls back to the vocabulary's default. Declared
+              ;; wins over inferred, because a source that says `^I32` has
+              ;; said something and inference must not argue with it.
+              declared (sp/kin-tag ctx (:tag (meta nm)))
+              tag (or declared produced)
+              ty (get-in (or tag default) [:types (t ctx)])
+              _ (sp/kin-declare-tag! ctx nm tag)]
           (sp/kin-emit! ctx (sp/indent-of ctx)
                            ;; `^:mut` on a LOCAL, for the same reason it is on
                            ;; a parameter: Rust alone has to say that a binding
@@ -329,7 +361,9 @@
   [default]
   (fn [ctx form]
     (let [nm (second form)
-          ty (get-in (or (sp/kin-tag ctx (:tag (meta nm))) default) [:types (t ctx)])
+          tag (sp/kin-tag ctx (:tag (meta nm)))
+          ty (get-in (or tag default) [:types (t ctx)])
+          _ (sp/kin-declare-tag! ctx nm tag)
           n (sp/local-name ctx nm)]
       (sp/kin-emit! ctx (sp/indent-of ctx)
                     (case (t ctx)
@@ -528,7 +562,9 @@
   (fn [ctx form]
     (let [[_ binding & body] form
           [nm start end] binding
-          ty (get-in (or (sp/kin-tag ctx (:tag (meta nm))) default) [:types (t ctx)])
+          tag (sp/kin-tag ctx (:tag (meta nm)))
+          ty (get-in (or tag default) [:types (t ctx)])
+          _ (sp/kin-declare-tag! ctx nm tag)
           n (sp/local-name ctx nm)
           a (strip-parens (sp/kin-render ctx start))
           b (strip-parens (sp/kin-render ctx end))]
@@ -659,7 +695,9 @@
   (let [[_ nm v] form
         pub? (:pub (meta nm))
         cn (const-name (t ctx) nm)
-        ty (get-in (sp/kin-tag ctx (:tag (meta nm))) [:types (t ctx)])
+        tag (sp/kin-tag ctx (:tag (meta nm)))
+        _ (sp/kin-declare-tag! ctx nm tag)
+        ty (get-in tag [:types (t ctx)])
         ;; The SOURCE says whether a constant is written in hex, by wrapping
         ;; it in `(hex ...)` or not. Deriving it from the value produced
         ;; `HASH_TRUE = 0x4cf`, which is the right number and the wrong

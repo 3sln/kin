@@ -128,8 +128,13 @@
     (for [target emit-for]
       (let [ctx (assoc (kin/context {} target)
                        :vocabs vocabs :scope-syms scope
+                       ;; The order the source REQUIRED its vocabularies in,
+                       ;; so `literal-tag` can ask them first-match-first --
+                       ;; the same rule the require scope resolves by.
+                       :vocab-order (:required (:report (read-source path)))
                        :targets targets
-                       :locals (atom {}) :names (atom {}) :tmp (atom 0))]
+                       :locals (atom {}) :names (atom {})
+                       :local-tags (atom {}) :tmp (atom 0))]
         (doseq [f forms] (kin/kin-statement! ctx f))
         [target (kin/kin-output ctx)]))))
 
@@ -358,7 +363,9 @@
     ;; render rather than inferred from its shape.
     (let [ctx (assoc (kin/context {} (first emit-for))
                      :vocabs vocabs :scope-syms scope :targets targets
-                     :locals (atom {}) :names (atom {}) :tmp (atom 0))
+                     :vocab-order (:required report)
+                     :locals (atom {}) :names (atom {})
+                     :local-tags (atom {}) :tmp (atom 0))
           ;; A RENDER THAT FAILS STILL ANSWERS THE QUESTION. `why` is the
           ;; command you reach for BECAUSE generation broke, so a throw here
           ;; is reported and the symbol table printed anyway -- from however
