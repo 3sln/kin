@@ -1275,11 +1275,19 @@ paths are computed must never be in the same diff.
 
 ### `:wrap`, whose semantics were never written down
 
+> **ANSWERED, and the name has since been reused.** I guessed `:wrap` owned
+> the surrounding text and the indent, and flagged the guess for confirmation.
+> The answer came as `:emit` (C7): a per-target function handed the context
+> and every form, which owns the whole file -- prefix, suffix, import anchors
+> and the sub-emission of each form. That is strictly more than the guess.
+>
+> `:wrap` now names something DIFFERENT: the first slot of a form map
+> (`{:wrap :declare :generate}`), which establishes scope around whichever
+> pass is running and may use only the scope protocol. Target-level `:wrap`
+> does not exist. Nothing below needs confirming.
+
 The generated code sits inside `impl Rt { }` in Rust and `class Maps { }` on
-the ports, which is also where the sidecar's `indent 4` came from. Treat
-`:wrap` as owning both the surrounding text and the indent it implies —
-and CONFIRM that reading with the author before building on it, because it is
-inference from a one-word mention rather than something they said.
+the ports, which is also where the sidecar's `indent 4` came from.
 
 ---
 
@@ -1368,12 +1376,13 @@ A source generates for exactly that set and no other. A target named in
 vocabulary and the target -- not a silent omission. Silence and success must
 be distinguishable; that rule has cost this project four separate bugs.
 
-Open question for whoever does this, NOT decided here: the `.targets` file
-already maps target -> output path and indent, per source. Item 3 puts target
-SELECTION in the ns form while target DESTINATION stays in a sidecar file.
-That may be right (selection is a property of the source, destination is a
-property of the project) or the two may want to be one thing. Decide it
-deliberately and write down which.
+> **SETTLED by C2 -- this is no longer an open question.** Destination is
+> computed from the namespace by a per-target `:path` function; the `.targets`
+> sidecar is gone. Selection stays in the source, destination belongs to the
+> target, and neither is listed per source. The text below is kept because the
+> reasoning it records -- that a source can generate for a target and have no
+> destination at all, as `unsigned.kin` does -- survived the decision and is
+> still true.
 
 > **OVERRULED — see correction C2 at the top of this file.** This was decided
 > the other way (`doc/decisions.md` A: keep the sidecar, cross-check it) and
