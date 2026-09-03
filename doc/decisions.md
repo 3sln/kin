@@ -1,7 +1,8 @@
 # Decisions taken during the redesign
 
-`doc/redesign.md` left three questions open. This file records what was
-decided about each and what became of it.
+`doc/redesign.md` left three questions open, and item 5 posed a fourth that
+was to be settled by measurement rather than argument. This file records what
+was decided about each and what became of it.
 
 **Two of the three were not decisions to take, and the third was taken and
 then overruled.** That is recorded here rather than deleted: a reader who
@@ -15,6 +16,7 @@ lost is still the argument a future reader will re-invent.
 | A | target destination vs selection | **OVERRULED** by correction C2 |
 | B | tag dispatch shape | **DISSOLVED** by correction C1 — not kin's question |
 | C | unknown-tag behaviour | **DISSOLVED** by correction C1 — not kin's question |
+| D | does a tag subsume `u<`/`uquot`? | **ANSWERED by the work** — partly; the six stay |
 
 ---
 
@@ -173,6 +175,47 @@ enforces.
 > the vocabulary had nothing to say.
 
 ---
+
+## D — Does tag dispatch subsume `u<` and `uquot`? Partly, and the six stay
+
+Redesign item 5 posed this as the test of whether the tag design is real: the
+flint subject had just gained `u<`, `u>`, `u<=`, `u>=`, `uquot`, `urem`
+because an `I32` is Rust's `u32` and the ports' signed `int`, so the generic
+operators disagree above 2^31. "If it cannot express this case, it is not
+carrying its weight."
+
+**It expresses it.** `flint.impl.rt` gained a `U32` tag -- the same host types
+as `I32`, `u32` and `int`, and a different claim about the value -- and
+implemented `<`, `>`, `<=`, `>=`, `quot` and `rem` as forms that read their
+arguments' tags. `unsigned.kin` now says
+
+    (defn ^:method ^Bool ult [^Rt rt ^U32 a ^U32 b] (return (< a b)))
+
+where it said `(u< a b)`, and the generated code is byte-identical on all
+three targets. Retagging those parameters `^I32` makes the ports disagree
+with Rust again -- `1 0 1 1 ...` against `0 1 1 0 ...` -- which is the check
+that the tag is doing the work rather than the templates coinciding.
+
+This is also the clearest demonstration of why C1 is right. The types are
+IDENTICAL: `U32` and `I32` are both `u32`/`int`/`int`. The difference is a
+claim about the value, which is data, and the only thing that can act on it
+is a form that chooses to.
+
+**But the six do not collapse, and the reason is worth recording.** The
+chooser requires BOTH arguments to be tagged `U32`, so
+
+    (< hash 5)
+
+gets the plain comparison, because a literal carries no tag saying it is
+small. The alternative -- unsigned if EITHER side might be large -- is a
+guess, and a guess that silently produces a plausible answer is the failure
+this project keeps paying for. So `u<` remains the way a source says what it
+means where a tag cannot say it.
+
+What actually changed is which one is the default. `<` is now correct for
+tagged values without anyone remembering, and `u<` is the explicit escape
+hatch rather than the only route. That is a smaller win than "six forms
+collapse into two", and it is the true one.
 
 ## What kin owes, after both corrections
 

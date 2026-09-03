@@ -77,6 +77,19 @@
          (< (+ at (count k)) (inc (count tmpl)))
          (contains? #{\) \, \]} (nth tmpl (+ at (count k)) \space)))))
 
+(defn fill
+  "Fill `tmpl` with argument texts that have ALREADY been rendered.
+
+  Split out of `call` so that a form which had to render its arguments itself
+  -- because it wanted their TAGS -- can still get the parenthesis handling
+  right without restating it, and without rendering them a second time. A
+  second render is not merely wasteful: an argument that hoists a temporary
+  would hoist it twice."
+  [tmpl texts]
+  (fmt tmpl (vec (map-indexed
+                  (fn [i c] (if (delimited? tmpl i) (strip-parens c) c))
+                  texts))))
+
 (defn call
   "A form that is a call: render the arguments, fill the target's template, and
   emit as a statement or an expression depending on where it sits.
@@ -100,12 +113,7 @@
                                 (pr-str (vec (sort-by str (keys tmpls)))))
                            {:form (first form) :target (t ctx)
                             :speaks (vec (keys tmpls))})))
-          as (vec (map-indexed
-                   (fn [i f]
-                     (let [c (sp/kin-render ctx f)]
-                       (if (delimited? tmpl i) (strip-parens c) c)))
-                   (rest form)))
-          code (fmt tmpl as)]
+          code (fill tmpl (mapv (fn [f] (sp/kin-render ctx f)) (rest form)))]
       ;; WHAT THIS CALL PRODUCED. `:tag` may be a value or a function of the
       ;; context, which is the form deciding about its own product -- kin
       ;; carries the answer and does not read it.

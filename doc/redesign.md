@@ -277,8 +277,12 @@ instead of `mul32`, `mul64`, `mulf` spelled by hand at every use.
 > **1 and 2 are DISSOLVED — see correction C1 at the top of this file.**
 > Neither is kin's question: tags are data and kin does not dispatch on them.
 > `doc/decisions.md` B and C record what was written before that ruling and
-> why it no longer applies. 3 remains, and is answered by the work rather than
-> by argument.
+> why it no longer applies.
+>
+> **3 is ANSWERED — `doc/decisions.md` D.** A `U32` tag does express the case,
+> and `unsigned.kin` is now written with the plain operators and generates
+> byte-identical code. The six `u*` forms nonetheless stay, because a literal
+> carries no tag and `(< hash 5)` must not be guessed at.
 
 1. **Dispatch shape.** A table `{[I32 I32] "..." [F64 F64] "..."}` is simple
    and closed; a function `(fn [ctx arg-tags] template)` is open and matches
