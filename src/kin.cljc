@@ -330,31 +330,16 @@
     :else (kin-emit! ctx (literal ctx form))))
 
 (defn local-name
-  "A dashed name, spelled the way THIS TARGET spells a local.
+  "A local, spelled the way THIS TARGET spells one.
 
-  The library knows no language. It asks the target, which is a map a project
-  supplies -- `:local-name` is one of its functions, alongside `:fn-name` and
-  the rest. A target that does not say gets its name unchanged, which is the
-  honest default: a tool that has not been told a convention must not invent
-  one.
-
-  Only dashed names are touched, so a constant like `SEED` passes through
-  whatever the target says."
+  The library knows no language. It asks the target's `:local-name`, which is
+  a `(fn [ctx sym] -> String)` supplied by a project -- so a mapper can see
+  what encloses the name, not only the name, and owns whatever escaping or
+  refusal its language needs. A target that supplies none gets the symbol
+  unchanged, which is the honest default: a tool that has not been told a
+  convention must not invent one."
   [ctx sym]
-  (let [t (get-in ctx [:targets (:target ctx)])
-        s (str sym)
-        s (if (clojure.string/includes? s "-") ((:local-name t identity) s) s)]
-    (if-not (contains? (:reserved t) s)
-      s
-      (if-let [esc (:escape t)]
-        (esc s)
-        ;; No escape and no rename is a name that cannot compile. Refusing
-        ;; here names the source, the target and the word; the alternative is
-        ;; a build error in generated code, which is a worse place to learn it.
-        (throw (ex-info (str "kin: `" s "` is a reserved word in "
-                            (name (:target ctx)) ", which has no escape -- "
-                            "rename it in the source")
-                        {:name s :target (:target ctx)}))))))
+  ((get-in ctx [:targets (:target ctx) :local-name] (fn [_ s] (str s))) ctx sym))
 
 (defn literal
   "A non-form: a symbol, a number, a string, a boolean."

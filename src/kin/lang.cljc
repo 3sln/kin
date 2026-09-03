@@ -146,7 +146,7 @@
   file happened to know. That is what lets a project add a fourth language
   without editing this one."
   [ctx nm]
-  ((get-in ctx [:targets (:target ctx) :fn-name] str) (str nm)))
+  ((get-in ctx [:targets (:target ctx) :fn-name] (fn [_ s] (str s))) ctx nm))
 
 (defn- ty-of [ctx default tag] (get-in (or (sp/kin-tag ctx tag) default) [:types (t ctx)]))
 
