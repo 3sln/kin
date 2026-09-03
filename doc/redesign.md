@@ -299,6 +299,85 @@ cannot affect the RESULT. It can still affect the failure REPORT, and a report
 whose lines reorder between runs is much harder to read than one that does
 not.
 
+## C7 — Should kin splice at all? One namespace, one whole file.
+
+Verbatim:
+
+> I don't think kin should really be splicing anyway... does it splice into
+> existing files now? It seems like it makes more sense to keep kin as
+> 1 namespace -> one file, and have the target code import/require/use it.
+
+**It does splice, today.** Nine regions each in `map.rs`, `Maps.java` and
+`Maps.cs`, and kin owns 57% of `Maps.java` and 43% of `map.rs`. The rest is
+hand-written, and the two are interleaved.
+
+The instinct is right and the destination is better. Whole files delete the
+markers, the splice, the region parser, the indent arithmetic, and a whole
+class of bug that bit twice in one session -- a carve that swallowed a
+declaration next to the region it was replacing, silently, both times. It
+makes `check-kin` trivially correct (regenerate, compare whole files) and
+makes the batch staging of C6 simpler still.
+
+Three things stand between here and there, and the third is the real one.
+
+### 1. Java has no partial classes, and the other two are fine
+
+The generated code is methods on a type: `impl Rt` in Rust, `static` members
+of `Maps` in Java and C#.
+
+* **Rust** allows several inherent `impl Rt` blocks in one crate, so
+  `champ.rs` can carry its own and `map.rs` keeps its own. Works as is.
+* **C#** has `partial class`, so `Maps.Champ.cs` and `Maps.cs` are the same
+  class in two files. Works as is.
+* **Java has neither.** A class cannot be split across files, so a generated
+  unit must become its OWN class -- `Champ.cnKey(...)` where the hand-written
+  code says `cnKey(...)` today.
+
+That is not fatal and is arguably better: kin already models cross-unit calls
+with `sibling`, and a unit that owns a file IS a sibling. But it changes every
+call site in the hand-written Java, and it means the three targets stop having
+the same shape -- two carry on with one class, Java grows a class per unit.
+(A `class Maps extends MapsGen` would keep the call sites, since Java inherits
+statics. It is available; it is also strange, and worth rejecting explicitly
+rather than not noticing.)
+
+### 2. `:wrap` gets more load-bearing, not less
+
+Today `:wrap` supplies an indent. For a whole file it must supply the file:
+the `package` line and class in Java, the `using`s and namespace in C#, the
+`impl Rt {` in Rust, and every import the generated code needs. The
+`Addr`-not-in-scope failure earlier this session was exactly a missing import
+in a spliced region, and whole-file generation makes that kin's problem to get
+right every time rather than the host file's problem to have got right once.
+
+### 3. REGIONS ARE WHAT MADE THE PORT INCREMENTAL, and that is the cost
+
+This is the sequencing problem and it is not a detail. Whole-file ownership
+means kin owns a unit ENTIRELY -- and today it owns 43% of `map.rs`. The
+remaining 57% is blocked on capabilities kin does not have: closures for
+`map_for_each`, tag dispatch for `map_assoc`/`map_get`/`map_dissoc`, roughly
+375 lines of it.
+
+You cannot generate half a file. So either:
+
+* **finish a unit before switching it.** `Hash`, `Pike` and `Interns` may
+  already be fully owned or close to it -- COUNT before assuming -- and could
+  move to whole-file now, proving the mechanism on a small unit while `Maps`
+  keeps regions;
+* **or keep regions as a transitional mechanism** and retire them per unit as
+  each becomes fully owned, with the last region deleted being the end of the
+  port.
+
+The second is what the tree is already doing without having said so. Saying it
+makes regions a temporary scaffold with a defined end, rather than a
+permanent feature of the design -- which is a different thing to build and a
+different thing to document.
+
+**Recommendation:** adopt whole-file as the target design and the default for
+any unit kin fully owns; keep splicing available for units it does not, and
+name it as scaffolding. Do not delete splicing until the port is finished,
+because deleting it stops the port.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:
