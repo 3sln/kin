@@ -15,6 +15,8 @@
     :fn-name     (fn [ctx sym] -> String) for a function
     :reserved    words this language will not accept as an identifier
     :indent-unit one level of indentation, defaulting to four spaces
+    :hoists?     may a function be called before it is defined? default true
+    :forward-declaration  (fn [ctx sym] -> String) when it may not
     :dest        where this target's files live -- a root path
     :path        (fn [ns] -> String or nil) namespace -> file, under :dest
     :indent      (fn [ns] -> int) how deep the region sits in its file
@@ -141,6 +143,15 @@
    :reserved csharp-reserved
    :local-name (namer camel #(str "@" %) csharp-reserved)
    :fn-name (namer pascal #(str "@" %) csharp-reserved)})
+
+(defn- rust-forward
+  "Rust has no forward declaration for an inherent method, and does not need
+  one: items in a `impl` block are visible to each other regardless of order.
+  So `:hoists?` is true and this is unused -- kept as the worked shape for a
+  target that genuinely cannot, C being the obvious one, where a `(declare
+  foo)` has to become `int foo(int);` above the first use."
+  [_ sym]
+  (str "// forward: " sym))
 
 (def defaults
   "The three kin ships with. A project takes these, extends them, replaces

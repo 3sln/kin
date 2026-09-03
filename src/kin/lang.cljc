@@ -822,10 +822,41 @@
     ;; Clojure does. Across namespaces it is neither needed nor available:
     ;; dependencies form a DAG, so everything a namespace requires is already
     ;; emitted in full before it starts.
-    'declare (fn [ctx form]
-               (doseq [nm (rest form)]
-                 (kin/declare-form!
-                  ctx {:scope (if (:pub (meta nm)) :public :private)} nm)))
+    ;; `(declare foo bar)` -- a FORWARD REFERENCE, in two halves.
+    ;;
+    ;; `:declare` reserves the names so link can resolve a reference to them
+    ;; before the definition arrives. `:generate` EMITS a forward declaration
+    ;; where the target language needs one, and that is the better reason for
+    ;; keeping `declare` mandatory than strictness was: if the target cannot
+    ;; HOIST, the generated code needs its own forward declaration -- a C
+    ;; prototype, a Rust ordering constraint. Java hoists within a class and
+    ;; needs nothing, so it emits nothing.
+    ;;
+    ;; A TARGET SAYS WHETHER IT HOISTS, and how it spells a forward
+    ;; declaration if it does not. kin has no view on either: `:hoists?`
+    ;; false plus `:forward-declaration` is the target describing its own
+    ;; language, exactly as `:reserved` and `:local-name` are.
+    'declare {:declare (fn [ctx form]
+                         (doseq [nm (rest form)]
+                           (kin/declare-form!
+                            ctx {:scope (if (:pub (meta nm)) :public :private)} nm)))
+              :generate
+              (fn [ctx form]
+                (doseq [nm (rest form)]
+                  (kin/declare-form!
+                   ctx {:scope (if (:pub (meta nm)) :public :private)} nm))
+                (let [tgt (get-in ctx [:targets (t ctx)])]
+                  (when-not (:hoists? tgt true)
+                    (if-let [spell (:forward-declaration tgt)]
+                      (doseq [nm (rest form)]
+                        (kin/emit! ctx (kin/indent-of ctx) (spell ctx nm) "\n"))
+                      (throw (ex-info
+                              (str "kin: " (t ctx) " says it does not hoist, so"
+                                   " `(declare " (str/join " " (rest form))
+                                   ")` needs a forward declaration in the"
+                                   " output -- but the target supplies no"
+                                   " `:forward-declaration` to spell one.")
+                              {:target (t ctx) :names (vec (rest form))}))))))}
     'break (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "break;\n"))
     'continue (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "continue;\n"))
     'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))}
