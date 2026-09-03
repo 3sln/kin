@@ -1530,7 +1530,19 @@ be distinguishable; that rule has cost this project four separate bugs.
 > then overruled by the author. Destination is computed from the namespace and
 > the sidecar goes away.
 
-## 4. Commands that answer "why"
+## 4. Answers to "why" — FUNCTIONS, not commands
+
+> **SUPERSEDED IN FRAMING by C4.** This item was written as two CLI commands
+> because at the time kin had a `bin/kin`. It does not: kin is a library, the
+> script lives in the consumer's tree, and `why` and `targets-report` are
+> FUNCTIONS RETURNING DATA with printing left to the caller.
+>
+> That is not a cosmetic difference. Returning data is what lets the
+> diagnostics be tested against a memory vfs, which is the whole argument of
+> C5 -- and a command that prints cannot be. The invocations below are how
+> flint's own `kin/kin` script spells them, not part of kin.
+>
+> Kept because WHAT they must answer is unchanged, and that is the useful part.
 
 Two directions, both needed, because today neither is answerable without
 reading the generator:
