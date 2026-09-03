@@ -375,14 +375,40 @@ Whole-file ownership means kin owns a unit ENTIRELY, and today it owns 43% of
 `map_for_each`, tag dispatch for `map_assoc`/`map_get`/`map_dissoc` -- about
 375 lines of it. You cannot generate half a file.
 
-So regions are SCAFFOLDING with a defined end, not a feature:
+So regions are SCAFFOLDING with a defined end, not a feature.
 
-* units kin already owns outright move to whole-file now. COUNT before
-  assuming which those are -- `hash`, `pike` and `interns` are the candidates;
-* units it does not keep their regions until the port reaches them, and the
-  last region deleted is the end of the port.
+### COUNTED, and it changes the plan: no flint unit qualifies yet
 
-Do not delete splicing before then, because deleting it stops the port.
+I guessed `hash`, `pike` and `interns` were nearly owned and said to count
+rather than assume. Counting says none of them are close. Percentage of each
+destination file that lives inside a kin region:
+
+| unit | rust | java | c# |
+| --- | --- | --- | --- |
+| `hash` | 19% | 31% | 40% |
+| `seqs` | 14% | 26% | 27% |
+| `interns` | -- | 20% | 21% |
+| `pike` | 4% | 8% | 8% |
+| `eq` | 4% | 9% | 9% |
+| `maps` | 43% | 57% | -- |
+
+The most kin owns of anything is 57%, and the units I expected to be nearly
+finished are the ones it owns LEAST. Every one of these files is majority
+hand-written.
+
+So there is nothing in flint that can adopt whole-file emission today, and a
+plan that starts by converting a flint unit would discover that halfway
+through. Two consequences:
+
+* **prove the mechanism on `examples/go`**, which is greenfield and which kin
+  owns outright. That is what an example project is for, and it exercises
+  `:emit` end to end -- package line, wrapper, import anchor -- without
+  needing anything in flint to be finished first;
+* **flint keeps regions until the port catches up**, which is further off than
+  it looked an hour ago. The last region deleted is still the end of the port;
+  the port is simply younger than the numbers suggested.
+
+Do not delete splicing. Nothing in the real consumer could survive it.
 
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
