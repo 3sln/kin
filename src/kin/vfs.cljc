@@ -91,7 +91,16 @@
      Vfs
      (-exists? [_ path] (.exists (java.io.File. (str root "/" path))))
      (-read [_ path] (slurp (str root "/" path)))
-     (-write [_ path content] (spit (str root "/" path) content) nil)
+     (-write [_ path content]
+       ;; PARENT DIRECTORIES ARE MADE, because a whole-file target CREATES its
+       ;; destination -- `com/example/Thing.java` needs `com/example` to
+       ;; exist. The region path never needed this: it writes into a file a
+       ;; person already wrote. This is the implementation growing, not the
+       ;; protocol: `-write` still means `put this content there`.
+       (let [f (java.io.File. (str root "/" path))]
+         (when-let [dir (.getParentFile f)] (.mkdirs dir))
+         (spit f content))
+       nil)
      Listing
      ;; One level, not a walk. A source directory of `.kin` files is what
      ;; this is for, and a recursive listing is a thing to add when something

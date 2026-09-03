@@ -96,8 +96,34 @@ A vocabulary is one var holding one map:
 **`examples/go`** is this, end to end, and it runs:
 
 ```
-cd examples/go && ./gen kin/gcd.kin
+cd examples/go && ./emit kin/gcd.kin
 ```
+
+One source becomes a **Go module file** and a **Java class file**:
+
+```go
+// out/go/gcd.go
+package gcd
+
+import "strconv"
+
+func Gcd(a int, b int) int { ... }
+```
+```java
+// out/java/example/Gcd.java
+package example;
+
+import java.util.Objects;
+
+public final class Gcd {
+    public static int gcd(int a, int b) { ... }
+}
+```
+
+**kin produces modules; the language consumes them.** Nothing is split across
+files and no language needs a partial anything — something new is created and
+the hand-written code imports it. `gofmt` has nothing to reformat, `javac`
+compiles clean, and both print `6 21` when called.
 
 Three files, none of which kin knows anything about:
 
@@ -109,9 +135,20 @@ Three files, none of which kin knows anything about:
       :local-name (namer camel)          ; how a local is spelled
       :fn-name (namer pascal)            ; an exported Go function is capitalised
       :indent-unit "\t"                  ; Go indents with tabs
-      :vfs (vfs/disk-vfs "out")          ; WHERE, as a protocol impl
-      :path (fn [ns] (str (last-segment ns) ".go"))}}
+      :vfs (vfs/disk-vfs "out/go")       ; WHERE, as a protocol impl
+      :path (fn [ns] (str (last-segment ns) ".go"))
+      :emit go-emit}}                    ; and what the FILE looks like
 ```
+
+**`:emit` owns the file.** It is handed the context and every form — the `ns`
+form included — and decides the prefix, the suffix, the anchors, and the
+sub-emission of each form, which *it* invokes. That last part is the
+difference between wrapping and owning: it can emit **between** forms, and it
+can drop an anchor for imports so that a type discovered deep in a function
+body appears at the top of the file.
+
+A target with an `:emit` produces a whole file, which kin creates. A target
+without one produces a region, spliced between markers.
 
 `:vfs` and `:path` are how a target says where a namespace's code goes. It is
 **computed, not listed**: give it a namespace and it answers a file, with no
@@ -125,9 +162,10 @@ ordinary one; `kin.vfs/memory-vfs` is a map, and it is what lets `emit!` be
 tested end to end with no directory, no cleanup, and no chance that a passing
 test wrote into the tree it was checking (`test/emit.clj`).
 
-**The vocabulary** (`src/example/go.cljc`) — eight forms and two tags, because
-a vocabulary is as big as the sources that use it and no bigger. There is no
-base class to inherit and no set of forms you are obliged to provide.
+**The vocabulary** (`src/example/lang.cljc`) — ten forms and three tags,
+because a vocabulary is as big as the sources that use it and no bigger.
+There is no base class to inherit and no set of forms you are obliged to
+provide.
 
 **The project** — two lines of ordinary Clojure:
 

@@ -1,30 +1,143 @@
 (ns example.targets
-  "Go, described to kin.
+  "Two languages, described to kin.
 
-  Nothing here is registered with kin and nothing in kin knows the word `go`.
-  A target is a map; this is one."
+  Nothing here is registered with kin and nothing in kin knows the word `go`
+  or the word `java`. A target is a map; these are two.
+
+  ## `:emit` is what owns the file
+
+  Each target's `:emit` is handed the context and EVERY form -- the `ns` form
+  included -- and decides the whole file: the prefix, the anchors, the
+  context the form emitters run in, and the sub-emission of each form, which
+  it invokes itself. That last part is the difference between wrapping and
+  owning: it can emit BETWEEN forms, not only around them.
+
+  kin produces a MODULE and the language consumes it. Go takes a module file;
+  Java takes a class file at the package path. Nothing is split across files
+  and no language needs a partial anything -- something new is created, and
+  the hand-written code imports it."
   (:require [clojure.string :as str]
+            [kin :as sp]
             [kin.vfs :as vfs]))
 
-(def reserved
+(def go-reserved
   #{"break" "case" "chan" "const" "continue" "default" "defer" "else"
     "fallthrough" "for" "func" "go" "goto" "if" "import" "interface" "map"
     "package" "range" "return" "select" "struct" "switch" "type" "var"})
 
+(def java-reserved
+  #{"abstract" "assert" "boolean" "break" "byte" "case" "catch" "char" "class"
+    "const" "continue" "default" "do" "double" "else" "enum" "extends" "final"
+    "finally" "float" "for" "goto" "if" "implements" "import" "instanceof"
+    "int" "interface" "long" "native" "new" "package" "private" "protected"
+    "public" "return" "short" "static" "super" "switch" "this" "throw"
+    "throws" "try" "void" "volatile" "while"})
+
 (defn- camel [s]
   (let [[h & r] (str/split (str s) #"-")] (str h (str/join (map str/capitalize r)))))
 
+(defn- pascal [s]
+  (str/join (map str/capitalize (str/split (str s) #"-"))))
+
 (defn- namer
-  "Go has no verbatim identifier, so a reserved word is REFUSED by name
-  rather than mangled -- the same choice `kin.target` makes for Java."
-  [spell]
+  "Neither language has a verbatim identifier, so a reserved word is REFUSED
+  by name rather than mangled -- the same choice `kin.target` makes for Java."
+  [spell reserved]
   (fn [ctx sym]
     (let [s (spell (str sym))]
       (if-not (contains? reserved s)
         s
-        (throw (ex-info (str "kin: `" s "` is a keyword in Go, which has no"
-                             " escape -- rename it in the source")
+        (throw (ex-info (str "kin: `" s "` is a keyword in "
+                             (name (:target ctx)) ", which has no escape -- "
+                             "rename it in the source")
                         {:name s :target (:target ctx)}))))))
+
+(defn- segments [ns-name] (str/split (str ns-name) #"\."))
+(defn- last-seg [ns-name] (last (segments ns-name)))
+
+(defn- ns-form-of [forms]
+  (first (filter #(and (seq? %) (= 'ns (first %))) forms)))
+
+(defn- body-of [forms]
+  (remove #(and (seq? %) (= 'ns (first %))) forms))
+
+(defn- emit-body
+  "Every form, with a blank line BETWEEN them.
+
+  This is the part a `:wrap` could not have done. A prefix-and-suffix hook
+  can put text around the forms; separating them requires being the thing
+  that calls the emitter, which is why `:emit` invokes the sub-emission
+  itself rather than handing kin a pair of strings."
+  [ctx forms]
+  (doseq [[i f] (map-indexed vector forms)]
+    (when (pos? i) (sp/kin-emit! ctx "\n"))
+    (sp/kin-statement! ctx f)))
+
+(defn- with-header
+  "Drop an anchor where the header belongs, collect what the forms need, and
+  write the header afterwards.
+
+  THE THREE STEPS, and they are the whole pattern:
+
+  1. drop an anchor where the header goes, and put an ATOM in the context
+     beside it;
+  2. run the forms -- each one `swap!`s a DESCRIPTION of what it needs into
+     the atom, as data;
+  3. read the atom, dedupe, SORT, format, and emit against the anchor.
+
+  An anchor is resolved when the buffer is joined, so step 3 writes into a
+  place the output went past in step 2. That is what anchors are for.
+
+  ## The header is SORTED, and that is not tidiness
+
+  A set is unordered. If the header came out in a different order on two runs
+  the file would differ byte for byte while meaning exactly the same thing --
+  and a drift gate, whose entire job is comparing committed output against a
+  fresh generation, would report a difference that is not there. A gate that
+  fails at random is worse than no gate: it gets re-run until it passes, and
+  then it gets ignored."
+  [ctx render-header f]
+  (let [at (sp/kin-emit-anchor! ctx)
+        needs (atom #{})]
+    (sp/kin-scoped ctx {:key :needs :value needs} f)
+    (when (seq @needs)
+      (sp/kin-emit! at (render-header (sort @needs)) "\n"))))
+
+(defn go-emit
+  "A Go MODULE FILE: package clause, imports, then functions at top level."
+  [ctx forms]
+  (let [ns-name (second (ns-form-of forms))]
+    (sp/kin-emit! ctx "// Generated by kin. Do not edit.\n\n")
+    (sp/kin-emit! ctx "package " (last-seg ns-name) "\n\n")
+    (with-header
+      ctx
+      (fn [needs] (str/join (map (fn [n] (str "import \"" n "\"\n")) needs)))
+      (fn [inner] (emit-body inner (body-of forms))))))
+
+(defn java-emit
+  "A Java CLASS FILE at the package path: package, imports, wrapper class.
+
+  The wrapper is not a workaround. Java has no top-level function, so a place
+  to put one is what a class IS here -- the same job `package gcd` does in Go
+  and `impl Rt` does in Rust. The hand-written code calls `Gcd.gcd(a, b)`,
+  which is a module being consumed."
+  [ctx forms]
+  (let [ns-name (second (ns-form-of forms))
+        pkg (str/join "." (butlast (segments ns-name)))
+        cls (pascal (last-seg ns-name))]
+    (sp/kin-emit! ctx "// Generated by kin. Do not edit.\n\n")
+    (when (seq pkg) (sp/kin-emit! ctx "package " pkg ";\n\n"))
+    (with-header
+      ctx
+      (fn [needs] (str/join (map (fn [n] (str "import " n ";\n")) needs)))
+      (fn [inner]
+        (sp/kin-emit! inner "public final class " cls " {\n")
+        ;; The body is indented one level BECAUSE it is inside the class, and
+        ;; the target says so rather than a per-source `:indent` number in a
+        ;; sidecar. This is what `:emit` retires.
+        (sp/kin-scoped inner {:key :class :value cls :indent 1}
+                       (fn [in2] (emit-body in2 (body-of forms))))
+        (sp/kin-emit! inner "}\n")))))
 
 (def targets
   {:go {:key :go
@@ -34,16 +147,29 @@
         ;; defaulted to four spaces until this example asked for something
         ;; else -- which is the useful thing a worked example does.
         :indent-unit "\t"
-        :reserved reserved
-        :local-name (namer camel)
+        :reserved go-reserved
+        :local-name (namer camel go-reserved)
         ;; An exported Go function is capitalised. That is the whole of Go's
         ;; visibility rule and it lives here, where the language does.
-        :fn-name (namer (fn [s] (str/join (map str/capitalize (str/split s #"-")))))
-        ;; WHERE IT WRITES, as a vfs rather than a path. kin performs no I/O
-        ;; of its own; every byte goes through this. Swap it for
-        ;; `(vfs/memory-vfs)` and the same emit runs with no disk at all.
-        :vfs (vfs/disk-vfs "out")
+        :fn-name (namer pascal go-reserved)
+        :emit go-emit
+        :vfs (vfs/disk-vfs "out/go")
         ;; Namespace -> file. Deterministic, no table: `example.gcd` becomes
-        ;; `out/gcd.go`.
-        :path (fn [ns-name] (str (last (str/split (str ns-name) #"\.")) ".go"))
-        :indent 0}})
+        ;; `out/go/gcd.go`.
+        :path (fn [ns-name] (str (last-seg ns-name) ".go"))}
+
+   :java {:key :java
+          :ext "java"
+          :line-comment "//"
+          :reserved java-reserved
+          :local-name (namer camel java-reserved)
+          :fn-name (namer camel java-reserved)
+          :emit java-emit
+          :vfs (vfs/disk-vfs "out/java")
+          ;; THE PACKAGE PATH, which is where Java insists a class lives:
+          ;; `example.gcd` becomes `out/java/example/Gcd.java`. kin creates
+          ;; the directory, because a whole-file target creates its
+          ;; destination rather than writing into one somebody else made.
+          :path (fn [ns-name]
+                  (str (str/join "/" (butlast (segments ns-name))) "/"
+                       (pascal (last-seg ns-name)) ".java"))}})

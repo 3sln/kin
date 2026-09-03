@@ -204,6 +204,109 @@
   (is "9. and the already-written destination went back"
       good-host (get @backing "one.rs")))
 
+;; ---------------------------------------------------------------------------
+;; WHOLE FILES. A target with an `:emit` owns the file: no markers, no splice,
+;; and the destination is CREATED rather than written into.
+
+(def whole-target
+  (merge kin.target/rust
+         {:path (fn [_] "gen/thing.rs")
+          ;; `:emit` is handed every form, the ns form included, and drives
+          ;; the emission itself -- so it can put text before, after AND
+          ;; between the forms.
+          :emit (fn [ctx forms]
+                  (sp/kin-emit! ctx "// generated\n")
+                  (let [imports (sp/kin-emit-anchor! ctx)]
+                    (sp/kin-emit! ctx "mod thing {\n")
+                    (sp/kin-scoped
+                     ctx {:key :mod :value true :indent 1}
+                     (fn [inner]
+                       (doseq [[i f] (map-indexed vector
+                                                  (remove #(and (seq? %) (= 'ns (first %)))
+                                                          forms))]
+                         (when (pos? i) (sp/kin-emit! inner "\n"))
+                         (sp/kin-statement! inner f))))
+                    (sp/kin-emit! ctx "}\n")
+                    ;; Written LAST, into a place the output went past first.
+                    (sp/kin-emit! imports "use std::fmt;\n")))}))
+
+(is "10. a target with :emit produces whole files" true
+    (kp/whole-file? whole-target))
+(is "10. and one without does not" false
+    (kp/whole-file? (merge kin.target/rust {:path (fn [_] "x.rs")})))
+
+(let [fs (vfs/memory-vfs {})
+      prj (kp/project {:vocabularies [vocabulary]
+                       :target-order [:rust]
+                       :targets {:rust (assoc whole-target :vfs fs)}})
+      out (kp/emit! prj src-text "thing.kin")
+      written (get (vfs/files fs) "gen/thing.rs")]
+  ;; THE DESTINATION DID NOT EXIST. The region path refuses that by design;
+  ;; a whole-file target creates it, which is the one real difference.
+  (is "10. the file was created, not required to exist"
+      [{:target :rust :path "gen/thing.rs"}] out)
+  (is "10. the prefix and suffix are the target's"
+      [true true] [(str/starts-with? written "// generated\n")
+                   (str/ends-with? written "}\n")])
+  ;; The anchor is the whole point: emitted after the body, appearing before it.
+  (is "10. an anchor put the import above the code it was found in"
+      true (< (str/index-of written "use std::fmt;")
+              (str/index-of written "mod thing {")))
+  (is "10. and there are no markers anywhere"
+      false (str/includes? written "kin:begin"))
+  ;; Idempotent, like the region path.
+  (is "10. writing it twice gives the same bytes"
+      written (do (kp/emit! prj src-text "thing.kin")
+                  (get (vfs/files fs) "gen/thing.rs"))))
+
+;; THE HEADER MUST BE DETERMINISTIC. Forms contribute what they need as data
+;; into an atom `:emit` put in scope; `:emit` sorts before formatting. A set is
+;; unordered, so without the sort the same source could emit two byte-different
+;; files that mean the same thing -- and a drift gate would report a difference
+;; that is not there. A gate that fails at random is worse than no gate: it
+;; gets re-run until it passes, and then it gets ignored.
+(let [collected (atom [])
+      header-target
+      (merge kin.target/rust
+             {:path (fn [_] "h.rs")
+              :emit (fn [ctx forms]
+                      (let [at (sp/kin-emit-anchor! ctx)
+                            needs (atom #{})]
+                        (sp/kin-scoped
+                         ctx {:key :needs :value needs}
+                         (fn [inner]
+                           ;; Contributed in DELIBERATELY reverse order, with
+                           ;; a duplicate, which is what a real file does.
+                           (doseq [n ["zeta" "alpha" "zeta" "middle"]]
+                             (swap! (sp/kin-get inner :needs) conj n))
+                           (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
+                             (sp/kin-statement! inner f))))
+                        (reset! collected (vec (sort @needs)))
+                        (sp/kin-emit! at (str/join (map #(str "use " % ";\n")
+                                                        (sort @needs))))))})
+      fs (vfs/memory-vfs {})
+      prj (kp/project {:vocabularies [vocabulary]
+                       :target-order [:rust]
+                       :targets {:rust (assoc header-target :vfs fs)}})
+      _ (kp/emit! prj src-text "h.kin")
+      written (get (vfs/files fs) "h.rs")]
+  (is "12. duplicate contributions collapse to one"
+      ["alpha" "middle" "zeta"] @collected)
+  (is "12. and the header is emitted in sorted order"
+      "use alpha;\nuse middle;\nuse zeta;\n"
+      (subs written 0 (str/index-of written "fn "))))
+
+;; Two namespaces cannot BE the same file. The region path allows several
+;; writers per destination; this one cannot, and says so.
+(refuses "11. two sources claiming one whole file"
+         #(let [fs (vfs/memory-vfs {})]
+            (kp/emit-sources!
+             (kp/project {:vocabularies [vocabulary]
+                          :target-order [:rust]
+                          :targets {:rust (assoc whole-target :vfs fs)}})
+             [{:label "a.kin" :text src-text}
+              {:label "b.kin" :text other-source}])))
+
 ;; And the claim this file is really making.
 (println)
 (println "  (no directory was created, opened, or written by any of the above)")

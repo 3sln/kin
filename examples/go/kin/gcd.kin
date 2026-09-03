@@ -1,11 +1,17 @@
-;; Euclid, in a language kin has never heard of.
+;; Euclid, in two languages kin has never heard of.
 ;;
-;; Nothing in kin knows the word `go`. The target is described in
-;; `src/example/targets.cljc` and the forms in `src/example/go.cljc`, both of
-;; them ordinary files in this example project.
+;; Nothing in kin knows the word `go` or the word `java`. The targets are
+;; described in `src/example/targets.cljc` and the forms in
+;; `src/example/lang.cljc`, both ordinary files in this example project.
+;;
+;; ONE SOURCE, TWO FILE SHAPES. Go gets a module file -- `package gcd`, then
+;; imports, then functions. Java gets a class file at the package path --
+;; `package example;`, then imports, then `public final class Gcd` with the
+;; functions inside it. Each target's `:emit` writes its own; kin has no
+;; opinion about either.
 (ns example.gcd
-  (:require [example.go :refer [defn return let set while comment
-                                != > rem I32]]))
+  (:require [example.lang :refer [defn return let set while comment
+                                  to-str != > rem I32 Str]]))
 
 (defn ^I32 gcd [^I32 a ^I32 b]
   (comment "Euclid's algorithm, by repeated remainder.")
@@ -16,3 +22,10 @@
         (set x y)
         (set y t)))
     (return x)))
+
+;; `to-str` needs `strconv` in Go and `java.util.Objects` in Java, and it is
+;; discovered HERE, in the middle of the file. The import appears at the top
+;; regardless, because `:emit` dropped an anchor there before any of this ran.
+(defn ^Str gcd-label [^I32 a ^I32 b]
+  (comment "The answer, as text -- which is what needs the import.")
+  (return (to-str (gcd a b))))

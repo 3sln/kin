@@ -19,6 +19,7 @@ lost is still the argument a future reader will re-invent.
 | D | does a tag subsume `u<`/`uquot`? | **ANSWERED by the work** — partly; the six stay |
 | E | one vfs protocol or two? | **DECIDED** — two: `Vfs`, plus a `Listing` capability |
 | F | what a tree-wide `emit-all!` does with a failure | **OVERRULED** — the whole batch reverts |
+| G | how a target says it produces a whole file | **DECIDED** — it has an `:emit`; there is no second key |
 
 ---
 
@@ -303,6 +304,45 @@ nothing from the vfs beyond the three operations it already had.
 **The order is still sorted.** All-or-nothing means order cannot affect the
 result, but it can still affect a failure message, and one whose lines move
 between runs is harder to read.
+
+## G — A target produces a whole file exactly when it has an `:emit`
+
+C7 gives a target an `:emit` that owns the file: prefix, anchors, the context
+the form emitters run in, and the sub-emission of each form, invoked by it.
+That leaves a question C7 does not ask — how does the WRITE side know whether
+it has a region to splice or a file to write?
+
+**Decided: `:emit` present means whole file. There is no second key.**
+
+The two are not independent. A target with `:emit` has written its own
+`package` clause and wrapper class; splicing that between `kin:begin` and
+`kin:end` in a file somebody else wrote would be nonsense, and a target
+without `:emit` produces a fragment that is nothing but a region. One
+produces what the other consumes.
+
+The alternative was `:whole-file? true` alongside `:emit` — explicit, and a
+knob with exactly one sensible setting, which is a thing to get wrong rather
+than a thing to choose. Two configurations of it are meaningful in principle
+(`:emit` with splicing, for anchors inside a region) and neither is wanted by
+anything. If one ever is, that is the moment to add the key, with a case to
+point at rather than a guess to defend.
+
+**What the whole-file path does differently**, and it is a short list:
+
+* it CREATES the destination, where the region path refuses one that does not
+  exist. A region is written into hand-written code, so the file and its
+  markers come first; a module is the file, so kin makes it — and
+  `DiskVfs/-write` makes the parent directories, since `example/Gcd.java`
+  needs `example` to be there. Implementation, not protocol.
+* it refuses TWO sources claiming one destination. The region path allows
+  several writers per file and flint has nine into `map.rs`; one namespace to
+  one file cannot.
+* rollback (decision F) is incomplete for it, and this is stated rather than
+  hidden. Reverting is `-write` with content already held, and a file that
+  did not exist has no content to restore — the protocol has no `-delete`.
+  A failed batch that created files names them in the error as created and
+  unmakeable. A `Removable` capability is the shape if a consumer ever needs
+  true reversibility; decision E is the precedent, and nothing needs it yet.
 
 ## What kin owes, after both corrections
 

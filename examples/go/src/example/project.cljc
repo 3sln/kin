@@ -8,6 +8,6 @@
             [example.targets :as targets]))
 
 (def project
-  (delay (kp/load-project {:vocabularies '[example.go]
+  (delay (kp/load-project {:vocabularies '[example.lang]
                            :targets targets/targets
-                           :target-order [:go]})))
+                           :target-order [:go :java]})))

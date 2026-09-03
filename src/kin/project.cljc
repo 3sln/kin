@@ -167,6 +167,10 @@
      :ns ns-form
      :ns-name (second ns-form)
      :forms forms
+     ;; EVERY form, `ns` included and in source order. A target's `:emit` is
+     ;; handed this rather than `:forms`, because a function that decides what
+     ;; the file looks like needs the declaration that names it.
+     :all-forms (vec all)
      :scope (when ns-form (sp/require-scope ns-form vocabs))
      :report report
      ;; What this source generates for HERE: what it asks for, narrowed to
@@ -187,8 +191,35 @@
                            {:source label :wants want :configured order})))
                  have)}))
 
+(defn whole-file?
+  "Does `target` produce a whole FILE rather than a region?
+
+  It does exactly when it has an `:emit`, and the derivation is not a
+  shortcut: a target with `:emit` has written its own `package` line and
+  wrapper, so splicing that between `kin:begin` and `kin:end` in somebody
+  else's file would be nonsense. The two go together because one produces
+  what the other consumes.
+
+  The alternative was an explicit second key -- `:whole-file? true` alongside
+  `:emit` -- and it was rejected as a knob with exactly one sensible setting,
+  which is a thing to get wrong rather than a thing to choose. If a target
+  ever wants anchors AND splicing, that is the moment to add the key, with a
+  case to point at."
+  [target]
+  (some? (:emit target)))
+
 (defn- render
-  "Render `analysis` for one target, into a string."
+  "Render `analysis` for one target, into a string.
+
+  A target's `:emit` -- when it has one -- is handed the context and ALL the
+  forms and drives the emission ITSELF. That is the difference between
+  wrapping and owning: it can emit a prefix, drop an anchor for imports, emit
+  BETWEEN forms, and close with a suffix, because it is the thing calling
+  `kin-statement!` rather than something kin calls around a loop it owns.
+
+  A target without one keeps exactly the loop kin always ran, which is why
+  the whole change is additive and why a project generating regions today
+  notices nothing."
   [prj analysis target]
   (let [ctx (assoc (sp/context {} target)
                    :vocabs (:vocabularies prj)
@@ -200,7 +231,9 @@
                    :targets (:targets prj)
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))]
-    (doseq [f (:forms analysis)] (sp/kin-statement! ctx f))
+    (if-let [emit (get-in prj [:targets target :emit])]
+      (emit ctx (:all-forms analysis))
+      (doseq [f (:forms analysis)] (sp/kin-statement! ctx f)))
     (sp/kin-output ctx)))
 
 (defn generate
@@ -313,6 +346,7 @@
                       :let [d (destination prj t (:ns-name p))]]
                   {:label (:label p) :target t :vfs (first d) :path (second d)
                    :text (get (:generated p) t)
+                   :whole (whole-file? (get (:targets prj) t))
                    :indent (indent-for prj t (:ns-name p))})
         by-dest (group-by (juxt :target :path) (filter :path regions))]
     {:emitted (reduce (fn [m r] (update m (:label r) (fnil conj [])
@@ -320,23 +354,47 @@
                       {} regions)
      ;; PHASE 2. A missing marker throws here, still having written nothing.
      :staged (mapv (fn [[[target path] rs]]
-                     (let [fs (:vfs (first rs))]
-                       (when-not (vfs/-exists? fs path)
-                         (throw (ex-info
-                                 (str "kin: " target " sends "
-                                      (str/join ", " (map :label rs)) " to "
-                                      path ", which does not exist. A region"
-                                      " is written INTO a hand-written file,"
-                                      " so the file and its markers come"
-                                      " first.")
-                                 {:target target :path path})))
-                       (let [original (vfs/-read fs path)]
-                         {:vfs fs :target target :path path :original original
-                          :next (reduce (fn [c r]
-                                          (splice c (:label r)
-                                                  (block-lines (:text r) (:indent r))
-                                                  path))
-                                        original rs)})))
+                     (let [fs (:vfs (first rs))
+                           whole (:whole (first rs))]
+                       (if whole
+                         ;; A WHOLE FILE. There is nothing to splice into and
+                         ;; nothing to preserve: `:emit` wrote the package
+                         ;; line, the wrapper and the imports, so the text IS
+                         ;; the file. kin creates it if it is not there, which
+                         ;; is the one thing the region path never does.
+                         (do
+                           (when (< 1 (count rs))
+                             (throw (ex-info
+                                     (str "kin: " (count rs) " sources -- "
+                                          (str/join ", " (map :label rs))
+                                          " -- all want to BE " path ". A"
+                                          " whole-file target is one namespace"
+                                          " to one file; only the region path"
+                                          " can have several writers.")
+                                     {:target target :path path
+                                      :labels (mapv :label rs)})))
+                           {:vfs fs :target target :path path :whole true
+                            :existed? (vfs/-exists? fs path)
+                            :original (when (vfs/-exists? fs path) (vfs/-read fs path))
+                            :next (:text (first rs))})
+                         (do
+                           (when-not (vfs/-exists? fs path)
+                             (throw (ex-info
+                                     (str "kin: " target " sends "
+                                          (str/join ", " (map :label rs)) " to "
+                                          path ", which does not exist. A region"
+                                          " is written INTO a hand-written file,"
+                                          " so the file and its markers come"
+                                          " first.")
+                                     {:target target :path path})))
+                           (let [original (vfs/-read fs path)]
+                             {:vfs fs :target target :path path :existed? true
+                              :original original
+                              :next (reduce (fn [c r]
+                                              (splice c (:label r)
+                                                      (block-lines (:text r) (:indent r))
+                                                      path))
+                                            original rs)})))))
                    (sort-by (comp str first) by-dest))}))
 
 (defn- write-staged!
@@ -351,10 +409,22 @@
           ;; protocol operation, no temp paths, no `-delete`. That the design
           ;; needs no wider protocol is evidence the three operations were
           ;; the right three.
-          (let [failed (reduce (fn [acc {:keys [vfs path original]}]
-                                 (try (vfs/-write vfs path original) acc
-                                      (catch #?(:clj Exception :default :default) _
-                                        (conj acc path))))
+          (let [created (vec (keep (fn [d] (when-not (:existed? d) (:path d))) done))
+                failed (reduce (fn [acc {:keys [vfs path original existed?]}]
+                                 (if-not existed?
+                                   ;; A FILE KIN CREATED CANNOT BE UNMADE.
+                                   ;; Rollback is `-write` with content already
+                                   ;; in hand, and there is no content for a
+                                   ;; file that did not exist -- the protocol
+                                   ;; has no `-delete` and decision E says a
+                                   ;; capability is how it would get one, if a
+                                   ;; consumer ever needs true reversibility.
+                                   ;; Until then this is REPORTED rather than
+                                   ;; papered over.
+                                   acc
+                                   (try (vfs/-write vfs path original) acc
+                                        (catch #?(:clj Exception :default :default) _
+                                          (conj acc path)))))
                                [] done)]
             (if (seq failed)
               ;; A restore that fails silently leaves a tree that is neither
@@ -371,9 +441,14 @@
                       #?(:clj err)))
               (throw (ex-info
                       (str "kin: emit failed at " path " -- the whole batch"
-                           " was reverted, so the tree is exactly as it was.")
+                           " was reverted, so the tree is exactly as it was"
+                           (when (seq created)
+                             (str ", EXCEPT that these were newly created and"
+                                  " cannot be unmade: " (pr-str created)))
+                           ".")
                       {:failed-write path
-                       :reverted (vec (map :path done))}
+                       :created created
+                       :reverted (vec (keep (fn [d] (when (:existed? d) (:path d))) done))}
                       #?(:clj err)))))
           (recur (conj done one) (rest todo))))
       (vec (map (juxt :target :path) done)))))

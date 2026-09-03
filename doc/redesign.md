@@ -407,6 +407,14 @@ imports right ONCE and the generated code later needed one more. Under this
 pattern the form that emits an allocation declares that it needs `Addr` and
 the import is simply there.
 
+> **DONE, in `examples/go`.** `:emit` drops the anchor and puts an atom in
+> scope; `need!` in the vocabulary `swap!`s a plain string into it; `:emit`
+> sorts, formats and emits against the anchor afterwards. The form knows
+> nothing about how a header is written, which is why one `to-str` serves a
+> language that says `import "strconv"` and one that says
+> `import java.util.Objects;`. Pinned by `test/emit.clj` case 12, including
+> the duplicate and the deliberate reverse-order contribution.
+
 #### The hazard: the header must be DETERMINISTIC
 
 An atom collecting contributions is unordered, and Clojure sets are unordered.
