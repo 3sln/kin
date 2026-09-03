@@ -196,10 +196,67 @@
                       i))
                   items)))
 
+;; ------------------------------------------------------- context protocols
+;;
+;; A FORM HAS TWO CONCERNS: how to USE the thing it produces, and how to
+;; PRODUCE it. They run in different passes, and the passes have different
+;; powers -- so they are handed different CONTEXT TYPES rather than the same
+;; map with a rule attached.
+;;
+;;     Scoped      -scoped, -scope-get, -scope-all      BOTH
+;;     Declaring   -declaring?                          link pass only
+;;     Emitting    -emitting?                           generate pass only
+;;
+;; Enforcement by construction is the point. A `:generate` function that
+;; registers a declaration would quietly reintroduce the thing this split
+;; removes -- where knowing how to USE a namespace requires having EMITTED
+;; it. A convention drifts; a protocol does not.
+;;
+;; THE SCOPE STACK IS SHARED, deliberately. `:wrap` runs in both passes: the
+;; link pass needs to know it is inside a class to produce `Maps.mergeTwo`,
+;; and generate needs the same frame to indent. Two copies of that logic
+;; could disagree, which is the failure this codebase keeps finding. Sharing
+;; it also buys a checkable invariant -- `:wrap` may use ONLY the scope
+;; protocol, because it is handed whichever context the current pass uses and
+;; anything else fails against one of them.
+
+(defprotocol Scoped
+  "What both passes can do: ask what encloses them."
+  (-scope [this] "The scope map."))
+
+(defprotocol Declaring
+  "The LINK pass: resolve references and register definitions."
+  (-declaring? [this]))
+
+(defprotocol Emitting
+  "The GENERATE pass: produce text."
+  (-emitting? [this]))
+
+(defrecord GenContext [driver target out pre promises scope indent]
+  Scoped (-scope [_] scope)
+  Emitting (-emitting? [_] true))
+
+(defrecord LinkContext [driver target scope indent]
+  Scoped (-scope [_] scope)
+  Declaring (-declaring? [_] true))
+
+(defn- require-capability!
+  [ctx protocol what]
+  (when-not (satisfies? protocol ctx)
+    (throw (ex-info
+            (str "kin: this context cannot " what
+                 ". A `:generate` function may emit but not declare, and a"
+                 " `:declare` function may declare but not emit -- the two"
+                 " passes are different context TYPES so that the mistake is"
+                 " impossible rather than merely discouraged.")
+            {:wanted what :context (type ctx)})))
+  ctx)
+
 (defn context
-  "A fresh emission context for `target`."
+  "A fresh GENERATE context for `target`."
   [driver target]
-  {:driver driver
+  (map->GenContext
+   {:driver driver
    :target target
    :out (new-sink)
    ;; Statements to place BEFORE the one being built. A form that needs a
@@ -211,7 +268,7 @@
    ;; in by then.
    :promises (atom [])
    :scope {}
-   :indent 0})
+   :indent 0}))
 
 (defn scoped
   "Call `f` with `ctx` extended by one scoped entry.
@@ -942,6 +999,42 @@
   [ctx form]
   (in ctx :statement form))
 
+(defn form-slots
+  "A form implementation, normalised to its three slots.
+
+      {:wrap f :declare f :generate f}
+
+  A BARE FUNCTION MEANS `:generate`, and that default is right because most
+  forms have neither of the others: `let`, `if`, `while` and every operator
+  are generate-only. The bare function stays the common case and the map is
+  the exception.
+
+  A map rather than metadata, for the reason vocabularies became maps: things
+  kin must CHECK should be visible to it. kin can say `this entry has a
+  :declare that is not a function`; it cannot say that about metadata nobody
+  looked at."
+  [f]
+  (cond
+    (map? f) f
+    (fn? f) {:generate f}
+    :else (throw (ex-info
+                  (str "kin: a form implementation must be a function or a map"
+                       " of {:wrap :declare :generate}, not "
+                       (pr-str (type f)))
+                  {:implementation f}))))
+
+(defn- run-slot
+  "Run one slot of a form, inside its `:wrap` if it has one.
+
+  `:wrap` is handed WHICHEVER CONTEXT the current pass uses, which is what
+  makes the invariant enforce itself: a `:wrap` that tried to emit would fail
+  against the declare context, so it can only use the scope protocol."
+  [slots slot ctx form]
+  (let [run (fn [c] (when-let [f (clojure.core/get slots slot)] (f c form)))]
+    (if-let [w (:wrap slots)]
+      (w ctx (fn [inner] (run inner)))
+      (run ctx))))
+
 (defn dispatch
   "One form. A seq whose head is in scope goes to its implementation.
 
@@ -964,7 +1057,7 @@
                       (let [sub (assoc ctx :out (new-sink))]
                         ((form-fn ctx (first form)) sub form)
                         (resolve-sink (deref (:out sub)))))))
-        (f ctx form))
+        (run-slot (form-slots f) :generate ctx form))
       (throw (ex-info (str "kin: " (first form) " is not in scope"
                            (when (:scope-syms ctx)
                              (str " -- this file requires "
