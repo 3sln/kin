@@ -876,38 +876,59 @@ appear where a call cannot -- in a parameter list, a return position, a `case`
 label -- and the three are resolved in the same scope but used in different
 places.
 
-### CYCLES: form cycles are fine, TAG cycles are not
+### CYCLES: kin follows Clojure. No namespace cycles, and `declare-` for the rest
 
-C8 says a scan pass makes cycles stop mattering. That was too strong, and the
-author is right to push on it: something has to run to produce the exports.
+**DECIDED, and it dissolves the problem rather than surviving it.** The author:
 
-The precise answer follows from the head-only rule below. To build A's export
-vocabulary you need A's `defn` and `def` HEADS. To resolve a head you need A's
-require scope -- because a head says `^Value`, and tags come from requires.
+> What about the third option? kin follows clojure's lead and doesn't support
+> cycling namespace dependencies? What we can allow as a deferred form
+> implementation via 'declare-form', 'declare-tag' etc type counterparts to the
+> define ones. The declare ones inject an indirecting placeholder that gets
+> filled later; however these cannot be *invoked* or used before they're
+> defined or they throw. This matches clojure.
 
-* If A's heads use only tags from BASE vocabularies -- `^Value`, `^I32`, the
-  ordinary case -- then A's exports compute without B having been touched.
-  **A and B may call each other's functions freely.** `node_assoc` and
-  `coll_assoc` in flint do exactly this today, in one file.
-* If A's head says `^StructFromB` and B's head says `^StructFromA`, that is a
-  genuine cycle with no starting point, and no amount of pass ordering fixes
-  it.
+So:
 
-So the rule is: **mutual FUNCTION recursion across namespaces is supported;
-mutual TYPE dependency is not.** That is the same rule a language without
-forward declarations has, and it is worth stating in those terms because it
-will be familiar rather than surprising.
+* **namespace dependencies form a DAG.** Sort topologically, emit in
+  dependency order, and every namespace's exports are complete before any
+  dependent is emitted;
+* **within** a namespace, `declare-form!` and `declare-tag!` mirror the
+  `define-` pair and allow forward reference -- an indirecting placeholder
+  filled when the definition arrives, which throws if something needs its
+  content before then. Exactly `clojure.core/declare` and exactly its failure
+  mode.
 
-The handling should be: do not refuse form cycles, they are ordinary. DETECT
-tag cycles and refuse with both namespaces and the offending tag named. An
-error that says "cyclic dependency" without saying which tag made it cyclic
-sends the reader to bisect their requires by hand.
+**Everything below this was scaffolding for cycles, and goes.** One pass, not
+two. No tolerant collecting mode, no `:scan?` flag in the context, no deferred
+anchor resolution for calls, and resolution stays STRICT -- an unresolved
+symbol is an error at the moment it is read, which is the property that has
+caught real bugs here.
 
-**And this is what the head-only rule actually buys.** C10 below frames it as
-a performance constraint -- that needing the body would double the run. That
-is true and it is the smaller reason. The bigger one is that heads-only is
-what makes form cycles resolvable at all: a body may call anything, so a pass
-that needed bodies would have to resolve every call before any export existed.
+The `heads-only` rule goes too. It existed so that exports could be collected
+without emitting bodies, because bodies reference other namespaces. With
+dependency order, B is fully emitted -- bodies and all -- before A is started,
+so A's calls resolve against B's completed exports. Nothing has to be derived
+from a signature.
+
+I had offered three options (a tolerant discarded pass, a scan flag, deferred
+resolution) and recommended the first. All three existed only to survive
+cycles. This is better than the best of them because it removes the thing they
+were surviving.
+
+#### What it costs flint, which is nothing it has not already decided
+
+`nodeassoc.kin` and `collassoc.kin` call each other -- a genuine cycle. Under
+this rule they merge into one namespace, which is right: they are two halves
+of one algorithm, and Clojure would say the same.
+
+**The tree already agrees.** `dissoc.kin` ships `node-dissoc` and
+`coll-dissoc` together, and its own comment gives the reason: "they call each
+other, so they ship as one source." That call was made once, deliberately.
+`nodeassoc` and `collassoc` are separate only because they were ported in
+separate slices -- sequencing, not design.
+
+So the rule is one the tree follows where anyone thought about it, and
+violates where nobody did. That is the best evidence a rule can have.
 
 ### The one real constraint: an export must derive from the HEAD
 
