@@ -23,6 +23,7 @@ lost is still the argument a future reader will re-invent.
 | — | precedence: own definitions vs imported names | **OPEN** — recommendation below, not settled |
 | — | what `declare` means with no runtime | **ANSWERED by the promise model** — a bare declare defers |
 | H | provenance format for an unsettled node | **DECIDED** — form, label, deps by kind, and which failure |
+| I | layout, and who writes the consuming lines | **DECIDED** — `kingen/*`; kin reports the lines, never writes them |
 
 ---
 
@@ -469,6 +470,58 @@ Four choices in that, each for a reason:
 count of settling passes. Those describe kin's execution; the reader is
 debugging their source, and every line that is about kin rather than about
 their code is a line they have to skip.
+
+## I — Layout, and who maintains the consuming lines
+
+Decision 5 of the seven settles the layout: `kingen/*` then the host
+language's convention. The part left open was who maintains the lines that
+make a generated module reachable.
+
+**The layout is ONE SHAPE for all three**, which was not obvious and is worth
+recording. Rust mirrors a module path onto directories exactly as Java
+mirrors a package and C# a namespace:
+
+    flint.rt.maps  ->  kingen/flint/rt/maps.rs
+                       kingen/flint/rt/Maps.java
+                       kingen/flint/rt/Maps.cs
+
+Only the FILENAME differs, because only Rust has a module that is not a
+class. `kin.target/module-path` is the whole of it.
+
+Generated code lives in a subtree PARALLEL to the human source, which also
+settles the naming collision the old layout had: `flint.rt.maps` writes into
+the generated tree and never contends with the hand-written `Maps`.
+
+### Four lines, two questions, one answer
+
+There are two kinds of line in hand-written files that a generated module
+needs:
+
+* the CONSUMING line -- `mod` in Rust, `import static` in Java, `using
+  static` in C# -- so existing call sites stay unqualified;
+* Rust's PARENT DECLARATION, `pub mod maps;` in `flint/rt.rs`, without which
+  the file is not compiled at all. Java and C# need no equivalent.
+
+**Decided: kin REPORTS them and does not write them.**
+
+Writing them means kin editing files it does not own, which is the splice
+problem under another name -- and the splice is precisely what the whole
+module design exists to delete. A generator that writes into hand-written
+files has the same drift risk whether it writes a region or a single line.
+
+They also change on a completely different clock. A consuming line changes
+when a NAMESPACE is added or removed, which is rare and deliberate; generated
+content changes on every emit. Coupling the rare thing to the frequent one
+means re-deriving sixteen stable lines on every run to check they have not
+moved.
+
+**The one real hazard, named rather than waved at.** A missing `import
+static` or `using static` fails loudly at the call site. A missing `pub mod
+maps;` in Rust does NOT: the file is simply never compiled, and if nothing
+happens to call into it the build stays green while the module is dead. That
+is the silent failure this project keeps removing, so the report is a CHECK
+rather than a courtesy -- it lists the lines each hand-written file must
+carry, and a project can fail its build when one is absent.
 
 ## What kin owes, after both corrections
 

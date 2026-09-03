@@ -153,6 +153,30 @@
   [_ sym]
   (str "// forward: " sym))
 
+(defn module-path
+  "A namespace's file, under a generated ROOT, in the host convention.
+
+      flint.rt.maps  ->  kingen/flint/rt/maps.rs      (:rust)
+                         kingen/flint/rt/Maps.java    (:java)
+                         kingen/flint/rt/Maps.cs      (:csharp)
+
+  THE SHAPE IS THE SAME FOR ALL THREE, which is the part worth recording
+  because it was not obvious: Rust mirrors the module path onto directories
+  exactly as Java mirrors a package and C# a namespace. Only the FILENAME
+  differs -- Rust keeps the tail as written, the other two capitalise it into
+  a class name -- because only Rust has a module that is not a class.
+
+  `root` is the generated subtree. Generated code lives parallel to the human
+  source rather than inside it, which is also what settles the naming
+  collision: `flint.rt.maps` writes to the generated tree and never contends
+  with the hand-written `Maps`."
+  [root ns-name {:keys [ext capitalise?]}]
+  (let [segs (str/split (str ns-name) #"\.")
+        dirs (butlast segs)
+        tail (last segs)]
+    (str/join "/" (concat (when (seq root) [root]) dirs
+                          [(str (if capitalise? (pascal tail) tail) "." ext)]))))
+
 (def defaults
   "The three kin ships with. A project takes these, extends them, replaces
   them, or supplies its own entirely -- they carry no special status."

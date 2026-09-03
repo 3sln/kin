@@ -87,6 +87,25 @@
   (is "4. and both carry the scope stack"
       [true true] [(satisfies? kin/Scoped gen) (satisfies? kin/Scoped link)]))
 
+
+;; ---------------------------------------------------------------------------
+;; LAYOUT: `kingen/*` then the host convention, ONE SHAPE for all three.
+;;
+;; Rust mirrors a module path onto directories exactly as Java mirrors a
+;; package and C# a namespace. Only the filename differs, because only Rust
+;; has a module that is not a class.
+(is "5. one namespace, three files, the same directory shape"
+    ["kingen/flint/rt/maps.rs"
+     "kingen/flint/rt/Maps.java"
+     "kingen/flint/rt/Maps.cs"]
+    [(kin.target/module-path "kingen" 'flint.rt.maps {:ext "rs"})
+     (kin.target/module-path "kingen" 'flint.rt.maps {:ext "java" :capitalise? true})
+     (kin.target/module-path "kingen" 'flint.rt.maps {:ext "cs" :capitalise? true})])
+
+(is "5. a single-segment namespace needs no directories"
+    "kingen/gcd.go"
+    (kin.target/module-path "kingen" 'gcd {:ext "go"}))
+
 (println)
 (if (zero? @failures)
   (println "contexts: the slots dispatch and the capabilities are distinct\n")
