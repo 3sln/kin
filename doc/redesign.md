@@ -190,8 +190,10 @@ That may be right (selection is a property of the source, destination is a
 property of the project) or the two may want to be one thing. Decide it
 deliberately and write down which.
 
-> **DECIDED — `doc/decisions.md` A.** They stay separate, and `kin/emit`
-> refuses both ways of disagreeing before it writes anything.
+> **OVERRULED — see correction C2 at the top of this file.** This was decided
+> the other way (`doc/decisions.md` A: keep the sidecar, cross-check it) and
+> then overruled by the author. Destination is computed from the namespace and
+> the sidecar goes away.
 
 ## 4. Commands that answer "why"
 
@@ -241,8 +243,11 @@ instead of `mul32`, `mul64`, `mulf` spelled by hand at every use.
 
 ### Three things to decide, deliberately
 
-> **DECIDED — `doc/decisions.md` B and C**, and 3 is answered by the work
-> rather than by argument: see the `U32` experiment below.
+> **1 and 2 are DISSOLVED — see correction C1 at the top of this file.**
+> Neither is kin's question: tags are data and kin does not dispatch on them.
+> `doc/decisions.md` B and C record what was written before that ruling and
+> why it no longer applies. 3 remains, and is answered by the work rather than
+> by argument.
 
 1. **Dispatch shape.** A table `{[I32 I32] "..." [F64 F64] "..."}` is simple
    and closed; a function `(fn [ctx arg-tags] template)` is open and matches
