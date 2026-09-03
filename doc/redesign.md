@@ -132,6 +132,14 @@ operations were not:
   (-write   [this path content]))
 ```
 
+> **DONE, with the operations CHOSEN rather than given.** Those three are
+> what `emit!` actually needs and nothing more. Listing, deleting and
+> creating directories are deliberately absent: kin writes INTO files a
+> person already wrote, so it never creates one, and a protocol with three
+> operations is easier to implement for a new host than one with eight. A
+> protocol grows more easily than it shrinks. `kin.vfs/memory-vfs` is the
+> payoff -- `test/emit.clj` splices regions end to end with no directory.
+
 ### What this implies for the library's surface
 
 The most library-shaped split, and the one to aim at:
@@ -143,6 +151,13 @@ The most library-shaped split, and the one to aim at:
   user's implementation.
 * `why` and `targets-report` return DATA. Printing is the caller's business,
   which is what makes them usable from something other than a terminal.
+
+> **DONE.** `bin/kin` is deleted; 480 of its 503 lines are now `kin.project`
+> and `kin.vfs`. flint's `kin/gen`, `kin/emit`, `kin/destinations` and
+> `kin/kin` are real scripts over the library, and the printing that used to
+> be in the CLI lives in `kin/kin` where a project can change it. `kin.edn`
+> is gone too: a `:path` is a function and a `:vfs` is a protocol impl, so
+> the configuration is code, in `flint.impl.project`.
 
 ### And one thing kin cannot do at all
 
@@ -188,6 +203,37 @@ one protocol whose `-list` a target vfs may refuse, or it is two protocols --
 a readable/listable source and a readable/writable destination. The second is
 honester and is what I would build, but it is a choice, so make it
 deliberately and write down which and why.
+
+### The source vfs is what makes the DIAGNOSTICS testable
+
+From the author, and it is the strongest argument for the source vfs:
+
+> The suggestions for a src vfs also helps with the 'why' question, and with
+> reporting which kin files will actually be generated for which targets, and
+> why.
+
+`why` and `targets-report` are the two commands from item 4, and their whole
+job is to ENUMERATE: which sources exist, which targets each generates for,
+which vocabulary contributed each symbol, what got shadowed, what was ruled
+out and by whom. Enumeration is exactly what the source vfs provides, so they
+stop being commands that glob a real tree and become functions over a config.
+
+**And then they can be tested, which today they cannot.** A memory vfs holding
+three fabricated sources -- one that generates for every target, one excluded
+by an `:only`, one whose vocabulary cannot speak a target -- is a fixture that
+asserts the report says all three of those things and says WHY. No directory,
+no temporary files, no chance the test writes into the tree it is checking.
+The agent already built exactly that shape for `emit`; the diagnostics are the
+part still without it.
+
+This matters more than it sounds. `kin why` exists to catch the class of bug
+that let `LS_THUNK` through -- a symbol resolving to nothing in particular
+while every gate stayed green and the CLR quietly stopped compiling. A
+diagnostic built for that job is trusted by definition: nobody double-checks
+the tool they reached for BECAUSE they could not see the problem. So a `why`
+that is quietly wrong is worse than no `why` at all, because it ends the
+search. Of everything in this redesign it is the piece that most needs a test
+and, until the source vfs, was the piece that could least easily have one.
 
 ### Worth stating about ordering and failure
 
