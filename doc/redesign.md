@@ -1,3 +1,103 @@
+# CORRECTIONS FROM THE AUTHOR — these overrule what follows
+
+Two rulings arrived after the first four commits of this work. Both overrule
+text further down and one overrules a decision already taken and written up in
+`doc/decisions.md`. Read these before anything else in this file.
+
+## C1 — Tags are DATA. kin does not dispatch on them.
+
+Verbatim:
+
+> Tags must always be *just data*, their purpose is to let the forms decide
+> what to do with them. Tags have no *dispatch*, the forms decide to (and
+> whether) to handle the given tag.
+
+kin carries tags and never interprets them. A form receives each argument as
+rendered text plus whatever tag it carries, and does as it likes. kin has no
+dispatch table, no match rules, no notion of what any tag MEANS, and no
+opinion about whether two tags are compatible.
+
+This DELETES two questions item 5 posed as open — "table or function for
+dispatch" and "what happens on an unknown tag". Neither is kin's business. A
+form that wants to refuse an unknown tag refuses it; a form that wants a
+default takes one. `kin.lang` may implement whatever dispatch it likes for its
+own operators, and that is `kin.lang` speaking as a vocabulary, not kin
+speaking as a generator.
+
+What kin owes is therefore narrow, which is the point:
+
+* a form's product is text plus an optional tag;
+* an enclosing form sees each argument's text and tag;
+* declared tags (`^I32` on a parameter, a `:tag` on a call, a `defn` return)
+  flow to the products that carry them;
+* an unannotated local may take its tag from its initialiser.
+
+Nothing else. An implementation that finds itself asking what a tag means has
+gone wrong.
+
+## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
+
+Verbatim:
+
+> My intent is that the path for each unit from each target is computed from
+> the namespace name. It's deterministic. For each target the user supplies a
+> destination vfs (or a path I guess if we're being lazy) + a function from
+> namespace -> file path.
+
+So a target descriptor carries its own destination:
+
+```clojure
+{:key  :rust
+ :ext  "rs"
+ :dest "runtime/src"          ; a vfs, or a root path
+ :path (fn [ns] ...)          ; namespace -> file, under :dest
+ :wrap ...}
+```
+
+Selection stays in the source (`:kin/only` / `:kin/exclude`); destination
+belongs to the target. Nothing is listed per source, and the `.targets`
+sidecar goes away — sixteen files of three columns each, invented on the
+flint side, which should never have existed.
+
+`doc/decisions.md` decision A argued for keeping the sidecar and cross-checking
+it. That reasoning is superseded. Two of its observations survive and should be
+carried into whatever replaces it:
+
+* a source can generate for a target and have no destination at all —
+  `unsigned.kin` in the flint tree exists to be VERIFIED, not shipped, so
+  "generates for" and "is written somewhere" must stay separable;
+* `kin/emit` is a shell script that reads the sidecar with `while read`. If
+  destination becomes a Clojure function, the emit path needs a reader. That
+  is a real consequence to design for, not a reason to refuse the change.
+
+### What C2 implies for flint, which is the expensive part
+
+Nine kin sources — `champ`, `merge`, `copies`, `nodeassoc`, `collassoc`,
+`dissoc`, `find`, `collnode`, `nodeclass` — all emit into `map.rs`,
+`Maps.java` and `Maps.cs`. A namespace-to-path function CAN be many-to-one,
+but then the config carries a lookup table: the sidecar moved rather than
+removed.
+
+Those nine exist because the port went function by function, not because the
+subject wanted nine namespaces. One source per destination file — ns
+`flint.rt.maps` → `map.rs` / `Maps.java` / `Maps.cs` — makes the mapping
+deterministic with no table anywhere, and collapses nine regions per file into
+one.
+
+Do the consolidation, as its OWN commit, after the mechanism works, with
+`bin/check-kin` green either side. A merge of nine sources and a change in how
+paths are computed must never be in the same diff.
+
+### `:wrap`, whose semantics were never written down
+
+The generated code sits inside `impl Rt { }` in Rust and `class Maps { }` on
+the ports, which is also where the sidecar's `indent 4` came from. Treat
+`:wrap` as owning both the surrounding text and the indent it implies —
+and CONFIRM that reading with the author before building on it, because it is
+inference from a one-word mention rather than something they said.
+
+---
+
 # kin, as it should have been
 
 Written after fifteen sources shipped through it into three runtimes. It
