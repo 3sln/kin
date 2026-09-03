@@ -697,6 +697,74 @@ other than rename. That is a stronger check than the compiler passing.
 Do it when the tree is free -- 180 sites across two repositories will conflict
 with anything else in flight.
 
+> **DONE.** All 17, plus the `sp` alias: call sites now read `kin/emit!`.
+> `kin.cljc` carries `(:refer-clojure :exclude [get])` and qualifies its own
+> twelve core `get` calls, which is the only collision among the seventeen.
+>
+> THE BYTE-IDENTITY CHECK EARNED ITS KEEP IMMEDIATELY. The first attempt
+> renamed `kin-get` to `get` and only then qualified the core calls -- so
+> kin's own scope lookups were rewritten into map lookups on the context,
+> `position` began reading a key that was not there, and every statement
+> emitted as an expression: no indent, no semicolon, the closing brace on the
+> same line. Six of eighteen files changed. Nothing else in the tree would
+> have caught it -- the Clojure compiles, the tests passed, and the output
+> was wrong. Qualify first, rename second.
+
+## C10 — The TARGET should own the call shapes. Today the vocabulary does.
+
+The author asked how a target defines the way each kind of call is generated
+-- the local one and the exported one. Answering it from the code turned up
+something bigger than the question.
+
+**Today the target defines none of it.** `defn` in `kin.lang` builds the
+calling form itself and dispatches on target keys it knows BY NAME:
+
+```clojure
+(kin/declare-name! ctx recv {:rust "self" :java (str recv) :csharp (str recv)})
+```
+
+`kin/lang.cljc` names `:rust`, `:java` or `:csharp` THIRTY-ONE times. It is not
+a general vocabulary; it is a vocabulary for the three targets that shipped
+first. The go example says so plainly and works around it -- it writes its own
+`defn-form`, because "kin.lang's FORMS speak three languages that are not Go".
+
+That is worth stating flatly: **the complaint that started this redesign is not
+yet fixed, only documented.** "If the user wants to extend them to a new
+language, there's no clear path for them" -- and the path today is to
+reimplement `defn`, `let`, `if`, `for` and `case`. The go example is an honest
+demonstration of the problem, not of the solution.
+
+### What the answer looks like
+
+`:emit` already establishes the principle one level up: the target owns the
+FILE, and kin sequences. The same principle at form level means the target
+owns the SHAPES, and `kin.lang` sequences:
+
+* how a function is DECLARED -- signature, receiver, visibility;
+* how a LOCAL call is spelled -- `self.merge_two(...)`;
+* how an EXTERNAL call is spelled -- `Maps.mergeTwo(...)` plus the import it
+  must register.
+
+Put those in the target descriptor as functions, beside `:emit`, `:local-name`
+and `:fn-name`, and `kin.lang`'s `defn` stops naming targets: it asks the
+target how to spell the things only the target can know. A fourth language
+then supplies a descriptor instead of rewriting the vocabulary, which is the
+whole point.
+
+### And it answers the original question directly
+
+The local form and the export are two shapes of one definition, so they are
+two functions on the target descriptor, registered by `defn` at the same
+moment: one into the file-local declarations, one into the namespace's
+exports. kin carries both registries and decides neither shape.
+
+### Scope note
+
+This is larger than C8 and partly underneath it -- C8 cannot register an
+export shape that nothing defines. It is also not a prerequisite for the three
+built-in targets, which work today. Sequence it deliberately rather than
+folding it into C8 by accident.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:
