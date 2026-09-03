@@ -39,6 +39,71 @@ The second line is the subtle one: **the use-function runs in the DEPENDENT's
 context**, not the definer's. It is the same call-emitter `define-form!` would
 have registered -- obtained without emission.
 
+### The shape: a form is a map of three, and two context TYPES
+
+From the author, and it makes the separation structural rather than a rule:
+
+> I don't think the 'emit'/'generate' form function should be allowed to
+> register the thing to answer the first question at all. So each function
+> gets a different kind of context, a implementing a different protocol. Both
+> kinds of context need to implement the scope stack though, and we probably
+> even want to pull that out into its own thing so it doesn't need to be
+> re-implemented in each branch:
+
+```clojure
+(def class-form
+  {:wrap     (fn [context f] (kin/scoped ... (f)))
+   :declare  (fn ...)
+   :generate (fn ...)})
+```
+
+> And if the form is a function then it's assumed to be 'generate'?
+
+Yes -- and that default is right, because most forms have neither of the other
+two. `let`, `if`, `while` and every operator are generate-only. A bare
+function stays the common case; the map is the exception.
+
+### Enforcement by construction, which is the point
+
+Two context types implementing different protocols means a `:generate`
+function CANNOT register a declaration. Not "should not" -- cannot. That
+matters here specifically: permitting it would quietly reintroduce exactly
+what section 0 removed, where knowing how to use a thing requires having
+emitted it. A convention drifts; a protocol does not.
+
+Sketch:
+
+    Scoped      -scoped, -get, -get-all        BOTH context types
+    Declaring   -define-form!, -define-tag!, -define-name!    declare only
+    Emitting    -emit!, -render, -anchor!                     generate only
+
+### Why the scope stack must come out, and the invariant it buys
+
+`:wrap` runs in BOTH passes -- the declare scan needs to know it is inside a
+class to produce `Maps.mergeTwo`, and generate needs the same frame to indent
+and qualify. If the scope logic lived in each branch there would be two copies
+that can disagree, which is the failure mode this codebase keeps finding.
+
+So it is pulled out, and that yields a checkable invariant:
+
+**`:wrap` may use ONLY the scope protocol.** It is handed whichever context
+the current pass uses, so an attempt to emit fails against the declare
+context. The constraint enforces itself instead of needing a rule.
+
+### Two consequences worth stating before someone asks
+
+**`:wrap` cannot emit the class header.** Generate mode needs `class Maps {`
+and its closing brace; declare mode needs neither. So `:wrap` establishes
+scope only and `:generate` emits header, wrapped body, footer. That keeps
+`:wrap` honestly polymorphic rather than secretly generate-flavoured.
+
+**The declare pass walks CONTAINERS, not bodies.** A class's `:declare`
+recurses into its children to find their declarations; a `defn`'s `:declare`
+produces its entry from the head and does not descend. So `let`, `if`, `while`
+-- nearly every form -- never take part in the declare pass and never need
+anything but a bare function. "Does the declare pass have to handle every
+form?" is the first question an implementer asks, and the answer is no.
+
 ### Two decisions, not defaults
 
 **Metadata on the fn, or a map?** Metadata is lighter and leaves a bare
