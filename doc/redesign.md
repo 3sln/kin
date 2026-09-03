@@ -152,6 +152,55 @@ It belongs in the consumer's tree and always did. Worth stating plainly so the
 three layers are visible: `generate` is pure, `emit!` needs a vfs, and
 `verify` needs a machine.
 
+## C5 — `emit!` should be able to do the whole source tree, and sources get their own vfs
+
+Verbatim:
+
+> Does `emit!` scan src paths for `.kin` files and emit all? I think some
+> sugar for that would be good it it doesn't already. We could give the src
+> dir its own vfs for the scanning + reading.
+
+**It does not, today.** `emit` takes one source path. The scanning and the
+looping live in the CONSUMER'S shell scripts -- flint has
+`for src in kin/*.kin` in `bin/check-kin`, and had the same loop in its `gen`,
+`emit` and `verify` wrappers. Every consumer reimplements the same three
+lines, and gets to reimplement the ordering and the error handling with them.
+
+So: an `emit-all!` (name to taste) that scans, reads and emits the tree.
+
+### This settles a question C4 left open
+
+C4 asked whether there is one vfs or one per target. The answer is BOTH, and
+they are different vfs's doing different jobs:
+
+* the SOURCE vfs scans and reads -- it needs a listing operation, which is the
+  only reason `-list` exists;
+* each TARGET's vfs reads and writes its destinations -- it never lists.
+
+```clojure
+{:sources {:vfs (->DiskVfs "kin") :match "*.kin"}
+ :targets [{:key :rust :vfs (->DiskVfs "runtime/src") :path (fn [ns] ...)}
+           ...]}
+```
+
+That also means the protocol is not one flat set of operations. Either it is
+one protocol whose `-list` a target vfs may refuse, or it is two protocols --
+a readable/listable source and a readable/writable destination. The second is
+honester and is what I would build, but it is a choice, so make it
+deliberately and write down which and why.
+
+### Worth stating about ordering and failure
+
+Two things a per-file loop leaves to the caller and a tree-wide function has
+to answer:
+
+* **What happens when one source fails?** Stop, or emit the rest and report?
+  The tree-wide call is the first place this is a real question -- flint's
+  shell loop used `set -e` and stopped, which was never a decision.
+* **Is the order stable?** A glob's order is the filesystem's. Two runs that
+  emit the same sources in a different order are the same result, but a
+  FAILURE report that reorders between runs is much harder to read.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:
