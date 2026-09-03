@@ -153,7 +153,9 @@ can drop an anchor for imports so that a type discovered deep in a function
 body appears at the top of the file.
 
 A target with an `:emit` produces a whole file, which kin creates. A target
-without one produces a region, spliced between markers.
+without one produces the forms and nothing around them — useful for printing
+(a test harness wants the functions, not the module) but not something kin
+will write, because there is nowhere to put a fragment.
 
 `:vfs` and `:path` are how a target says where a namespace's code goes. It is
 **computed, not listed**: give it a namespace and it answers a file, with no
@@ -245,46 +247,57 @@ A target named in `:kin/only` that some required vocabulary cannot speak is an
 generating for nothing is an error too. Silence and success have to be
 distinguishable.
 
-## 6. Regions, and why generated code is committed
+## 6. Modules, and why generated code is committed
 
-> **Regions are SCAFFOLDING with a defined end.** The design they are heading
-> for is one namespace to one whole file, which deletes the markers, the
-> splice, the region parser and the indent arithmetic. Splicing exists because
-> a port arrives a function at a time and you cannot generate half a file —
-> so a unit keeps its regions until kin owns it entirely, and the last region
-> deleted is the end of the port.
+**One namespace, one whole file, created by kin.** A generated module lives in
+a subtree parallel to the hand-written source — `kingen/flint/rt/champ.rs`,
+`kingen/flint/rt/Champ.java`, `kingen/flint/rt/Champ.cs` — and the shape is
+the same for all three, because Rust mirrors a module path onto directories
+exactly as Java mirrors a package and C# a namespace. Only the filename
+differs, because only Rust has a module that is not a class.
 
-`emit!` writes **between markers** in a hand-written file:
-
-```rust
-// kin:begin kin/hash.kin
-...generated...
-// kin:end kin/hash.kin
-```
+> **There used to be a splice.** kin wrote between `kin:begin` / `kin:end`
+> markers in a hand-written file, because a port arrives a function at a time
+> and you cannot generate half a file. That was scaffolding with a defined
+> end, and the end has arrived: the markers, the splice, the region parser and
+> the indent arithmetic are all gone. kin never writes into a file it did not
+> create.
 
 The generated code is checked in on purpose. A runtime build must not need
 babashka — somebody cloning a repository to build its JVM runtime should not
 have to install a Clojure to do it, and a generator in the build path is a
-generator that breaks the build. So the tool is run by hand, its output is
-committed, and the markers make the next run a diff rather than a merge.
+generator that breaks the build. So the tool is run by hand and its output is
+committed.
 
-The cost of that choice is that the two can drift: a hand edit inside a region
-survives until someone re-emits, and a vocabulary change silently makes every
-committed region stale. **A project committing generated code needs a gate
-that re-emits everything and compares.** `kin.project/destinations` answers
-every `[target path]` the project would write, for exactly that purpose.
+The cost of that choice is that the two can drift: a hand edit survives until
+someone re-emits, and a vocabulary change silently makes every committed file
+stale. **A project committing generated code needs a gate that re-emits
+everything and compares.** `kin.project/destinations` answers every
+`[target path]` the project would write, for exactly that purpose.
+
+**The consuming lines are REPORTED, not written.** A generated module needs
+something in hand-written code to reach it — `mod` in Rust, `import static`
+in Java, `using static` in C# — and kin does not write those, because writing
+into a file it does not own is the splice problem under another name. They
+also change on a different clock: a consuming line changes when a namespace
+is added or removed, generated content changes on every emit.
+
+The hazard is worth naming. A missing `import static` or `using static` fails
+loudly at the call site; a missing `pub mod champ;` does not — the file is
+simply never compiled. So the report should be a **check**, and a project can
+fail its build when a line is absent.
 
 `emit-all!` is **atomic over the whole batch** — every source, every target,
-or nothing. Three phases: generate into memory, splice each destination once,
-then write, restoring the originals if a write fails partway. A partial tree
-is a state nobody designed and no gate describes.
+or nothing. Three phases: generate into memory, stage every destination, then
+write, restoring the originals if a write fails partway. A partial tree is a
+state nobody designed and no gate describes.
 
 ## 7. kin is a library, not a command
 
 **There is no `kin` executable.** The script belongs to the project using it,
 because what a project wants from a generator — where its sources live, how
 its output is printed, what its gates are — is the project's business. flint
-has `kin/gen`, `kin/emit`, `kin/destinations`, `kin/kin` and `kin/verify`;
+has `kin/scripts/gen`, `/emit`, `/destinations`, `/kin` and `/verify`;
 `examples/go` has `gen` and `emit`; each is a dozen lines over the library.
 
 The surface is three layers, and they differ in kind:
@@ -292,7 +305,7 @@ The surface is three layers, and they differ in kind:
 | | | |
 | --- | --- | --- |
 | `generate` | **pure** | source text in, `{target text}` out. Opens nothing. |
-| `emit!` | needs a **vfs** | reads, splices, writes — all through the user's implementation. |
+| `emit!` | needs a **vfs** | writes each namespace's module, creating it — all through the user's implementation. |
 | *verify* | needs a **machine** | compiling with `rustc` and running it is process execution. **Not in kin**, and never should have been — it lives in the consumer's tree. |
 
 `why` and `targets-report` return **data**. Printing is the caller's, which is

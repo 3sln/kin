@@ -523,6 +523,80 @@ is the silent failure this project keeps removing, so the report is a CHECK
 rather than a courtesy -- it lists the lines each hand-written file must
 carry, and a project can fail its build when one is absent.
 
+## J — What the region scrub actually cost
+
+Decision I settled the layout before any of it existed. Four things only
+showed up once forty-two modules were on disk and three compilers had an
+opinion, and all four are consequences rather than choices.
+
+### `^:instance` is not expressible as a module in Java
+
+`interns.kin` was four `^:instance` functions -- instance methods on all
+three targets, which `^:method` cannot say because it means "Rust `self`, the
+others a static taking it". They emitted `this.values` and `this.count`,
+which compiles only INSIDE the class declaring those fields.
+
+Rust can put an `impl InternTable` block in any module of the crate. C# has
+`partial class`. **Java has neither**, and no way to add an instance method
+to a class from another file. So the moment that source became
+`kingen/flint/rt/Interns.java` rather than a region spliced into
+`com.flint.rt.Interns`, `^:instance` stopped being expressible.
+
+flint's four moved to `^:method`. Rust's output did not change at all; the
+two ports gained a `t` parameter, lost a `this.`, and the table's three
+fields widened. `^:instance` STAYS IN kin -- it is right for a vocabulary
+whose targets can express it -- and flint cannot use it while it wants one
+source to serve all three.
+
+### The generated package had to move, not just the directory
+
+Five sources are named after the file they used to be spliced into: `eq`,
+`hash`, `interns`, `pike`, `seqs`. A generated `Eq` in `com.flint.rt` is a
+SECOND `com.flint.rt.Eq`. Decision I calls the generated subtree parallel to
+the human source; a parallel subtree in the same package is not parallel.
+
+So Java gets `package flint.rt` and C# `namespace flint.rt` -- lower-case,
+deliberately unlike `Flint.Rt`, so a reader can tell which tree a name came
+from. Rust needs no equivalent.
+
+It costs two things, and both are the same fact seen twice. A tag or a call
+that names one of those classes has to name it IN FULL, because inside
+`flint.rt` a bare `Eq` or `Interns` is the generated one -- so the `Interns`
+tag is `com.flint.rt.Interns` and `val-eq` is `com.flint.rt.Eq.eq`. And the
+verify harnesses have to nest a `com.flint.rt` class chain to match, which
+the C# side was already doing for its own version of the same shadowing.
+
+### Default visibility is crate-wide, and Java pays for it
+
+A source is its own file, so everything it defines is called from outside the
+file it lives in. An unmarked `fn` is module-private in Rust and an unmarked
+member is private in C#: both right while the code was spliced into its
+caller and wrong the moment it is not.
+
+    Rust    pub(crate) fn      `^:pub` still means `pub`
+    C#      internal static    `^:pub` still means `public`
+    Java    public static      `^:pub` means nothing here
+
+Java has package-private or public and nothing between, so once the boundary
+is a package boundary everything crossing it is public and `^:pub` stops
+distinguishing anything on that target. The hand-written side widened to
+match: seven node-layout constants and four helpers in each runtime.
+
+### Sibling imports are DERIVED, because importing them all does not work
+
+A generated module calls its siblings by their bare names, so Java and C#
+need a static import naming each one. Importing every sibling was the first
+answer and it is wrong: `mask` is a CHAMP bit helper in `com.flint.rt.Maps`
+and the intern table's slot mask in `flint.rt.Interns`, and two on-demand
+static imports offering one name make it AMBIGUOUS rather than resolved.
+
+So each source is read for the names it defines, and a module imports exactly
+the siblings whose names it mentions. That is a dependency computed from the
+sources rather than a list anyone maintains. `need!` -- every vocabulary
+entry declaring its imports as data, which `examples/go` does -- is the
+better answer for a vocabulary being written now; retrofitting it means
+annotating several hundred existing entries, and this needed none.
+
 ## What kin owes, after both corrections
 
 The corrections narrow kin's job, which is the point of them. On tags, all of

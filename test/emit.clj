@@ -1,5 +1,5 @@
 #!/usr/bin/env bb
-;; Does `emit!` splice a region correctly -- and can it do so without a disk?
+;; Does `emit!` write a module correctly -- and can it do so without a disk?
 ;;
 ;;     bb test/emit.clj
 ;;
@@ -9,15 +9,24 @@
 ;; existed, emit reached for `java.io.File` and `spit` directly, so testing it
 ;; at all meant scribbling somewhere real -- which is why it was never tested.
 ;;
+;; THERE USED TO BE A SPLICE. kin found a `kin:begin`/`kin:end` pair in a
+;; hand-written file and replaced the lines between them, and half of this
+;; file tested that: markers preserved, surrounding code surviving, several
+;; sources sharing one destination. All of it is gone. A target's `:emit`
+;; owns the whole file, so there is no hand-written content to preserve and
+;; no marker to lose.
+;;
 ;; What is pinned:
 ;;
-;;   1. the region between the markers is replaced, and everything outside
-;;      them -- including hand-written code after the end marker -- survives
+;;   1. the destination is CREATED, and its previous content does not survive
+;;      -- kin owns the file, so there is nowhere in one to put a hand edit
 ;;   2. emit is IDEMPOTENT: running it twice gives the same bytes
-;;   3. the indent a target asks for is applied to the block
+;;   3. the indent comes from the scope the `:emit` opens, not from a number
+;;      beside the destination
 ;;   4. a target whose `:path` answers nil is generated and written NOWHERE
-;;   5. a destination that does not exist is refused by name
-;;   6. a file missing either marker is refused by name
+;;   5. a target with a `:path` and NO `:emit` is refused by name -- it is
+;;      asking kin to write a fragment, which is what the splice used to take
+;;   6. a batch is atomic: one failure and nothing is written
 (require '[kin] '[kin.lang :as core] '[kin.target]
          '[kin.vfs :as vfs] '[kin.project :as kp] '[clojure.string :as str])
 
@@ -35,15 +44,24 @@
   "(ns demo.thing (:require [demo :refer [defn return I32 Rt]]))
    (defn ^:method ^I32 twice [^Rt rt ^I32 a] (return a))")
 
-(def host
-  (str "// a hand-written file\n"
-       "impl Rt {\n"
-       "    // kin:begin thing.kin\n"
-       "    STALE, and must not survive\n"
-       "    // kin:end thing.kin\n"
-       "\n"
-       "    fn hand_written(&self) {}\n"
-       "}\n"))
+(def other-source
+  "(ns demo.other (:require [demo :refer [defn return I32 Rt]]))
+   (defn ^:method ^I32 half [^Rt rt ^I32 a] (return a))")
+
+(defn impl-emit
+  "An `:emit` that wraps the forms in `impl Rt { }`.
+
+  The indent comes from the scope this opens, which is the thing that
+  replaced a per-destination `:indent` number. A wrapper knows how deep its
+  own body is; a table beside the file was restating it."
+  [ctx forms]
+  (kin/emit! ctx "// generated\n")
+  (kin/emit! ctx "impl Rt {\n")
+  (kin/scoped ctx {:key :impl :value "Rt" :indent 1}
+              (fn [inner]
+                (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
+                  (kin/statement! inner f))))
+  (kin/emit! ctx "}\n"))
 
 (defn project-with
   "A project whose :rust target writes into `fs`, and whose :java target --
@@ -54,13 +72,14 @@
                :targets {:rust (merge kin.target/rust
                                       {:vfs fs
                                        :path (fn [_] "thing.rs")
-                                       :indent 4})
+                                       :emit impl-emit})
                          ;; A REAL TARGET THAT IS WRITTEN NOWHERE. It
                          ;; generates like any other and its `:path` answers
                          ;; nil, which is how a source says `verify me, do not
                          ;; ship me`.
                          :java (merge kin.target/java
-                                      {:vfs fs :path (fn [_] nil)})}}))
+                                      {:vfs fs :path (fn [_] nil)
+                                       :emit impl-emit})}}))
 
 (def failures (atom 0))
 
@@ -78,21 +97,19 @@
       (do (swap! failures inc)
           (println (format "  FAIL %s -- it did NOT refuse" label))))))
 
-(println "\nemit: splicing a region, with no disk anywhere\n")
+(println "\nemit: writing a module, with no disk anywhere\n")
 
-;; 1 and 3. Splice, and indent.
-(let [fs (vfs/memory-vfs {"thing.rs" host})
+;; 1, 3 and 4.
+(let [fs (vfs/memory-vfs {"thing.rs" "STALE, and must not survive\n"})
       out (kp/emit! (project-with fs) src-text "thing.kin")
       written (get (vfs/files fs) "thing.rs")]
-  (is "1. the stale region is gone" false (str/includes? written "STALE"))
-  (is "1. the hand-written code after the end marker survives"
-      true (str/includes? written "fn hand_written(&self) {}"))
-  (is "1. and the line before the begin marker survives"
-      true (str/includes? written "// a hand-written file"))
-  (is "1. both markers are still there"
-      [true true] [(str/includes? written "kin:begin thing.kin")
-                   (str/includes? written "kin:end thing.kin")])
-  (is "3. the block is indented by the target's :indent"
+  ;; THE WHOLE FILE IS kin'S. What was there before is not merged with, not
+  ;; spliced around, and not preserved -- it is replaced.
+  (is "1. the previous content is gone" false (str/includes? written "STALE"))
+  (is "1. and the emit's own wrapper is the file"
+      [true true] [(str/starts-with? written "// generated\n")
+                   (str/ends-with? written "}\n")])
+  (is "3. the body is indented by the scope the :emit opened"
       true (str/includes? written "    pub(crate) fn twice(&self, a: i32) -> i32 {"))
   ;; 4. The ghost target generates and is written nowhere. That has to be
   ;; expressible: a source can exist to be VERIFIED rather than shipped.
@@ -107,80 +124,50 @@
                   (get (vfs/files fs) "thing.rs"))]
     (is "2. emitting twice gives the same bytes" written again)))
 
-;; 5 and 6. The refusals.
-(refuses "5. a destination that does not exist"
-         #(kp/emit! (project-with (vfs/memory-vfs {})) src-text "thing.kin"))
-(refuses "6. a file with no begin marker"
-         #(kp/emit! (project-with (vfs/memory-vfs {"thing.rs" "nothing here\n"}))
-                    src-text "thing.kin"))
-(refuses "6. a file with a begin marker and no end"
-         #(kp/emit! (project-with (vfs/memory-vfs
-                                   {"thing.rs" "// kin:begin thing.kin\n"}))
+;; 1 again, and it is the difference from the splice: kin CREATES the file.
+;; The region path refused a destination that did not exist, because a region
+;; goes into something somebody else wrote.
+(let [fs (vfs/memory-vfs {})]
+  (kp/emit! (project-with fs) src-text "thing.kin")
+  (is "1. a destination that did not exist is created"
+      true (contains? (vfs/files fs) "thing.rs")))
+
+;; 5. A `:path` with no `:emit` asks kin to write a fragment. There is
+;; nowhere to put one now, so it is refused by name.
+(refuses "5. a :path with no :emit"
+         #(kp/emit! (kp/project
+                     {:vocabularies [vocabulary]
+                      :target-order [:rust]
+                      :targets {:rust (merge kin.target/rust
+                                             {:vfs (vfs/memory-vfs {})
+                                              :path (fn [_] "thing.rs")})}})
                     src-text "thing.kin"))
 
 ;; ---------------------------------------------------------------------------
-;; ATOMICITY. A batch either happens or does not.
+;; 6. ATOMICITY. A batch either happens or does not.
 
-(def other-source
-  "(ns demo.other (:require [demo :refer [defn return I32 Rt]]))
-   (defn ^:method ^I32 half [^Rt rt ^I32 a] (return a))")
-
-(defn two-file-project [fs]
-  (kp/project {:vocabularies [vocabulary]
-               :target-order [:rust]
-               :targets {:rust (merge kin.target/rust
-                                      {:vfs fs
-                                       ;; BOTH namespaces go to the SAME file,
-                                       ;; which is the case that catches a
-                                       ;; per-source read-modify-write.
-                                       :path (fn [_] "thing.rs")
-                                       :indent 4})}}))
-
-;; Two sources into ONE destination. Doing this per source would read the file
-;; twice, and the second read would see the first source's output -- so a
-;; later failure would `roll back` to a tree that already had A in it.
-(let [two-region (str "impl Rt {\n"
-                      "    // kin:begin a.kin\n    old\n    // kin:end a.kin\n"
-                      "    // kin:begin b.kin\n    old\n    // kin:end b.kin\n"
-                      "}\n")
-      fs (vfs/memory-vfs {"thing.rs" two-region})
-      _ (kp/emit-sources! (two-file-project fs)
-                          [{:label "a.kin" :text src-text}
-                           {:label "b.kin" :text other-source}])
-      written (get (vfs/files fs) "thing.rs")]
-  (is "7. two sources into one destination both land"
-      [true true]
-      [(str/includes? written "fn twice(") (str/includes? written "fn half(")])
-  (is "7. and neither clobbered the other's region" false
-      (str/includes? written "old")))
-
-;; THE ATOMICITY CLAIM. One good source, one whose destination has no marker.
-;; The good one must not be written -- not `written and then reverted`, but
-;; indistinguishable from never having run.
-(let [good-host (str "// kin:begin a.kin\nold\n// kin:end a.kin\n")
-      fs (vfs/memory-vfs {"good.rs" good-host "bad.rs" "no markers here\n"})
+;; One good source, and a second that collides with it -- two namespaces
+;; cannot BE one file. The good one must not be written: not `written and
+;; then reverted`, but indistinguishable from never having run.
+(let [fs (vfs/memory-vfs {})
       prj (kp/project {:vocabularies [vocabulary]
                        :target-order [:rust]
                        :targets {:rust (merge kin.target/rust
                                               {:vfs fs
-                                               :path (fn [ns-name]
-                                                       (if (= 'demo.thing ns-name)
-                                                         "good.rs" "bad.rs"))})}})
+                                               :emit impl-emit
+                                               :path (fn [_] "same.rs")})}})
       err (try (kp/emit-sources! prj [{:label "a.kin" :text src-text}
                                       {:label "b.kin" :text other-source}])
                nil
                (catch Exception e (ex-message e)))]
-  (is "8. the batch refused" true (boolean err))
-  (is "8. and the GOOD destination is untouched" good-host
-      (get (vfs/files fs) "good.rs"))
-  (is "8. and the bad one is untouched too" "no markers here\n"
-      (get (vfs/files fs) "bad.rs")))
+  (is "6. the batch refused" true (boolean err))
+  (is "6. and NOTHING was created" {} (vfs/files fs)))
 
 ;; A write that fails PARTWAY is the harder case: some destinations are
 ;; already replaced. Everything must go back.
-(let [good-host (str "// kin:begin a.kin\nold\n// kin:end a.kin\n")
-      other-host (str "// kin:begin b.kin\nold\n// kin:end b.kin\n")
-      backing (atom {"one.rs" good-host "two.rs" other-host})
+(let [one-was "// one, as it was\n"
+      two-was "// two, as it was\n"
+      backing (atom {"one.rs" one-was "two.rs" two-was})
       exploding (reify vfs/Vfs
                   (-exists? [_ p] (contains? @backing p))
                   (-read [_ p] (get @backing p))
@@ -192,17 +179,18 @@
                        :target-order [:rust]
                        :targets {:rust (merge kin.target/rust
                                               {:vfs exploding
+                                               :emit impl-emit
                                                :path (fn [ns-name]
                                                        (if (= 'demo.thing ns-name)
                                                          "one.rs" "two.rs"))})}})
       err (try (kp/emit-sources! prj [{:label "a.kin" :text src-text}
                                       {:label "b.kin" :text other-source}])
                nil (catch Exception e (ex-message e)))]
-  (is "9. a write failing partway is reported" true (boolean err))
-  (is "9. and says the batch was reverted"
+  (is "6. a write failing partway is reported" true (boolean err))
+  (is "6. and says the batch was reverted"
       true (boolean (and err (str/includes? err "reverted"))))
-  (is "9. and the already-written destination went back"
-      good-host (get @backing "one.rs")))
+  (is "6. and the already-written destination went back"
+      one-was (get @backing "one.rs")))
 
 ;; ---------------------------------------------------------------------------
 ;; WHOLE FILES. A target with an `:emit` owns the file: no markers, no splice,
@@ -313,6 +301,6 @@
 
 (println)
 (if (zero? @failures)
-  (println "emit: the region splices, twice, and never touched a disk\n")
+  (println "emit: a module is written whole, twice, and never touched a disk\n")
   (do (println (format "emit: %d FAILURE(S)\n" @failures))
       (System/exit 1)))

@@ -11,9 +11,10 @@
 
       generate    PURE. Source text in, `{target text}` out. Opens nothing,
                   so it runs anywhere a reader does.
-      emit!       Needs a VFS. Reads the destination, splices the region,
-                  writes it back -- and every byte of that goes through the
-                  implementation the user put on the target.
+      emit!       Needs a VFS. Writes each namespace's module -- creating
+                  it, since kin owns the file entirely -- and every byte of
+                  that goes through the implementation the user put on the
+                  target.
       verify      Needs a MACHINE. Compiling with rustc and running the
                   result is process execution, which no vfs abstracts. It is
                   not here and never should have been: it belongs to the
@@ -458,68 +459,20 @@
         fs (vfs/resolve-vfs d)]
     (when (and rel fs) [fs rel])))
 
-(defn- indent-for [prj target ns-name]
-  (let [i (:indent (get (:targets prj) target))]
-    (cond (fn? i) (or (i ns-name) 0) (number? i) i :else 0)))
-
-(defn splice
-  "`content` with the lines between the markers for `marker` replaced by
-  `block`. The markers themselves stay."
-  [content marker block where]
-  (let [begin (str "kin:begin " marker)
-        end (str "kin:end " marker)
-        lines (str/split content #"\n" -1)]
-    (doseq [m [begin end]]
-      (when-not (some #(str/includes? % m) lines)
-        (throw (ex-info (str "kin: " where " has no `" m "` marker")
-                        {:marker marker :file where}))))
-    (str/join
-     "\n"
-     (loop [out [] ls lines skip false]
-       (if-let [l (first ls)]
-         (cond
-           (str/includes? l begin) (recur (into (conj out l) block) (rest ls) true)
-           (str/includes? l end) (recur (conj out l) (rest ls) false)
-           skip (recur out (rest ls) true)
-           :else (recur (conj out l) (rest ls) false))
-         out)))))
-
-(defn block-lines
-  "The generated text as lines, each non-empty one indented by `n` spaces."
-  [text n]
-  (let [pad (apply str (repeat n " "))
-        ;; THE TRAILING BLANK LINE IS DELIBERATE, and it is an inheritance.
-        ;; The shell `emit` this descends from piped `kin gen`, which prints
-        ;; the text and then a newline of its own, into a block file -- so
-        ;; every committed region ends with a blank line before its end
-        ;; marker. That is an artifact of how the old pipeline printed rather
-        ;; than anything the generator meant, but it is in every host file in
-        ;; the tree, and a mechanism change that also reflows eighteen files
-        ;; is a diff nobody can read. Reproduced here; worth removing on
-        ;; purpose, in a commit that does only that.
-        ls (str/split (str text "\n") #"\n" -1)
-        ;; ... and the last split piece is the end of the text rather than a
-        ;; line of it.
-        ls (if (= "" (last ls)) (butlast ls) ls)]
-    (mapv (fn [l] (if (= "" l) l (str pad l))) ls)))
-
 (defn- stage
-  "Phases 1 and 2 of an emit: generate everything, splice everything, in
-  memory. Writes nothing.
+  "Phases 1 and 2 of an emit: generate everything, in memory. Writes nothing.
 
   Answers `{:emitted {label [{:target :path}]} :staged [{...}]}` where each
-  staged entry holds the destination's ORIGINAL content and its next content,
-  which is all the rollback data phase 3 can need. That data is free: splicing
-  a region requires reading the whole destination anyway, so nothing is read
-  twice and no snapshot is taken.
+  staged entry holds the destination's ORIGINAL content, if it had any, and
+  its next content -- which is all the rollback data phase 3 can need.
 
-  EVERY REGION BOUND FOR A DESTINATION IS APPLIED IN ONE PASS. A destination
-  may be written by more than one source -- flint had nine emitting into
-  `map.rs` -- and doing it read-modify-write per source is wrong in a way that
-  only shows on failure: emit A into `map.rs`, emit B into it, then let C
-  fail, and `the original` to roll back to is whichever copy the last read
-  saw, which is the tree with A already in it. Accumulate first, write once,
-  and the question does not arise."
+  THERE USED TO BE A SPLICE HERE. kin read the destination, found a
+  `kin:begin`/`kin:end` pair, and replaced the lines between them; a
+  destination could have several writers, and getting the rollback right
+  meant accumulating every region for a file before writing it once. All of
+  that is gone. A target's `:emit` writes a whole file, so the text IS the
+  file, one namespace names one destination, and there is no hand-written
+  content to preserve because kin created the file."
   [prj entries]
   ;; PHASE 1, in DEPENDENCY ORDER and once per namespace. A form not in scope
   ;; or an undeclared constant throws here, having written nothing -- and a
@@ -531,60 +484,49 @@
                          :emit-for (:emit-for a)
                          :generated (clojure.core/get generated label)}))
                     entries)
-        regions (for [p plans
+        modules (for [p plans
                       t (:emit-for p)
                       :let [d (destination prj t (:ns-name p))]]
                   {:label (:label p) :target t :vfs (first d) :path (second d)
                    :text (get (:generated p) t)
-                   :whole (whole-file? (get (:targets prj) t))
-                   :indent (indent-for prj t (:ns-name p))})
-        by-dest (group-by (juxt :target :path) (filter :path regions))]
+                   :whole (whole-file? (get (:targets prj) t))})
+        by-dest (group-by (juxt :target :path) (filter :path modules))]
     {:emitted (reduce (fn [m r] (update m (:label r) (fnil conj [])
                                         {:target (:target r) :path (:path r)}))
-                      {} regions)
-     ;; PHASE 2. A missing marker throws here, still having written nothing.
+                      {} modules)
      :staged (mapv (fn [[[target path] rs]]
-                     (let [fs (:vfs (first rs))
-                           whole (:whole (first rs))]
-                       (if whole
-                         ;; A WHOLE FILE. There is nothing to splice into and
-                         ;; nothing to preserve: `:emit` wrote the package
-                         ;; line, the wrapper and the imports, so the text IS
-                         ;; the file. kin creates it if it is not there, which
-                         ;; is the one thing the region path never does.
-                         (do
-                           (when (< 1 (count rs))
-                             (throw (ex-info
-                                     (str "kin: " (count rs) " sources -- "
-                                          (str/join ", " (map :label rs))
-                                          " -- all want to BE " path ". A"
-                                          " whole-file target is one namespace"
-                                          " to one file; only the region path"
-                                          " can have several writers.")
-                                     {:target target :path path
-                                      :labels (mapv :label rs)})))
-                           {:vfs fs :target target :path path :whole true
-                            :existed? (vfs/-exists? fs path)
-                            :original (when (vfs/-exists? fs path) (vfs/-read fs path))
-                            :next (:text (first rs))})
-                         (do
-                           (when-not (vfs/-exists? fs path)
-                             (throw (ex-info
-                                     (str "kin: " target " sends "
-                                          (str/join ", " (map :label rs)) " to "
-                                          path ", which does not exist. A region"
-                                          " is written INTO a hand-written file,"
-                                          " so the file and its markers come"
-                                          " first.")
-                                     {:target target :path path})))
-                           (let [original (vfs/-read fs path)]
-                             {:vfs fs :target target :path path :existed? true
-                              :original original
-                              :next (reduce (fn [c r]
-                                              (splice c (:label r)
-                                                      (block-lines (:text r) (:indent r))
-                                                      path))
-                                            original rs)})))))
+                     (let [fs (:vfs (first rs))]
+                       ;; A TARGET THAT WRITES MUST HAVE AN `:emit`. Without
+                       ;; one `render` produces the forms and nothing else --
+                       ;; no package clause, no wrapper -- which is a fragment
+                       ;; and used to be spliced into a file somebody else
+                       ;; wrote. Now there is nowhere to put it, so a target
+                       ;; that asks to write without one is refused by name
+                       ;; rather than quietly writing a file that compiles
+                       ;; nowhere.
+                       (when-not (:whole (first rs))
+                         (throw (ex-info
+                                 (str "kin: target " target " has a `:path`"
+                                      " and no `:emit`, so it asks kin to"
+                                      " write " path " out of a fragment --"
+                                      " forms with no module around them."
+                                      " Give it an `:emit` that owns the"
+                                      " file, or a `:path` that answers nil.")
+                                 {:target target :path path
+                                  :labels (mapv :label rs)})))
+                       (when (< 1 (count rs))
+                         (throw (ex-info
+                                 (str "kin: " (count rs) " sources -- "
+                                      (str/join ", " (map :label rs))
+                                      " -- all want to BE " path ". A"
+                                      " whole-file target is one namespace"
+                                      " to one file.")
+                                 {:target target :path path
+                                  :labels (mapv :label rs)})))
+                       {:vfs fs :target target :path path :whole true
+                        :existed? (vfs/-exists? fs path)
+                        :original (when (vfs/-exists? fs path) (vfs/-read fs path))
+                        :next (:text (first rs))}))
                    (sort-by (comp str first) by-dest))}))
 
 (defn- write-staged!
@@ -647,7 +589,7 @@
   "Emit a batch of `{:label :text}` entries. ATOMIC: every source, every
   target, or nothing.
 
-  Three phases -- generate, splice, write -- and the first two write nothing,
+  Three phases -- generate, stage, write -- and the first two write nothing,
   so anything that can be detected before touching a destination is. A write
   that fails partway restores the originals it already replaced.
 
