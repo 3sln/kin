@@ -368,6 +368,58 @@ imports right once, and the generated code needed one more. With `:emit`
 owning the import anchor, a form that needs a type says so and the import is
 there.
 
+### How `:emit` and the forms collaborate
+
+From the author:
+
+> For imports, etc; the `:emit` fn and the forms can collaborate. For example
+> the `:emit` can install the anchor and add an atom to context, where all
+> inner forms can describe what they need as data, then `:emit` can format the
+> data into a deduped clean import/require header and emit it at the anchor.
+
+So the shape is:
+
+1. `:emit` drops an anchor where the header belongs and puts an ATOM in the
+   context beside it;
+2. every form that needs something in scope `swap!`s a description of it into
+   that atom -- as DATA, not as text;
+3. after the forms have run, `:emit` reads the atom, dedupes and formats, and
+   emits the header against the anchor.
+
+**kin already has every primitive this needs**, which is a good sign the
+design is landing where the machinery already pointed. `kin-emit-anchor!`
+drops an anchor resolved when the buffer is JOINED -- so something emitted
+late appears early -- and `kin-scoped` / `kin-get` carry values a form can
+reach from arbitrarily deep. What is missing is only `:emit` itself and a
+worked example.
+
+**kin must not know what an import IS.** A form contributes whatever its
+vocabulary and target have agreed on -- `{:type "Addr" :from "crate::mem"}`,
+or a bare symbol, or anything else -- and `:emit` turns it into
+`use crate::mem::Addr;` or `import com.flint.rt.Addr;`. The data shape is a
+contract between the vocabulary and the target, and kin's whole part is
+carrying the atom and guaranteeing the ordering. Same division as tags,
+targets and the vfs.
+
+**This is the fix for a bug that already happened.** `Addr` went unimported in
+a generated `map.rs` earlier this session, because the host file had got its
+imports right ONCE and the generated code later needed one more. Under this
+pattern the form that emits an allocation declares that it needs `Addr` and
+the import is simply there.
+
+#### The hazard: the header must be DETERMINISTIC
+
+An atom collecting contributions is unordered, and Clojure sets are unordered.
+If the header comes out in a different order on two runs, the generated file
+differs byte for byte while meaning exactly the same thing -- and `check-kin`,
+whose entire job is comparing committed output against a fresh generation,
+reports drift that is not there.
+
+A gate that fails at random is worse than no gate: it gets re-run until it
+passes, and then it gets ignored. So dedupe AND SORT before formatting, and
+make the ordering part of what the example demonstrates rather than something
+each vocabulary rediscovers.
+
 ### What still stands: regions are what made the port INCREMENTAL
 
 Whole-file ownership means kin owns a unit ENTIRELY, and today it owns 43% of
