@@ -20,6 +20,8 @@ lost is still the argument a future reader will re-invent.
 | E | one vfs protocol or two? | **DECIDED** — two: `Vfs`, plus a `Listing` capability |
 | F | what a tree-wide `emit-all!` does with a failure | **OVERRULED** — the whole batch reverts |
 | G | how a target says it produces a whole file | **DECIDED** — it has an `:emit`; there is no second key |
+| — | precedence: own definitions vs imported names | **OPEN** — recommendation below, not settled |
+| — | what `declare` means with no runtime | **OPEN** — strict implemented, head-carrying recommended |
 
 ---
 
@@ -343,6 +345,84 @@ point at rather than a guess to defend.
   A failed batch that created files names them in the error as created and
   unmakeable. A `Removable` capability is the shape if a consumer ever needs
   true reversibility; decision E is the precedent, and nothing needs it yet.
+
+## OPEN — what `declare` means when there is no runtime
+
+**Not decided. Implemented one way, raised because the other way is
+defensible and the difference is visible.**
+
+The ruling: `declare-form!` injects "an indirecting placeholder that gets
+filled later; however these cannot be *invoked* or used before they're
+defined or they throw. This matches clojure."
+
+In Clojure the mapping is clean because there are two times. `(declare odd)`
+makes a var; `(defn even [] (odd))` COMPILES against it; and calling `even`
+before `odd` is defined throws at RUNTIME. Refer freely, call at your peril.
+
+**kin has only one time.** Emission is all there is, and emitting `(odd rt x)`
+is exactly the act of asking the placeholder for its content — so the strict
+mapping makes a forward CALL throw, where Clojure's equivalent line compiles
+fine. Two readings:
+
+* **strict (implemented).** The name resolves; anything that asks it to emit
+  before the definition arrives throws. Faithful to the words, and it means
+  mutual recursion inside one namespace does not emit — `even` calling `odd`
+  fails when `odd`'s `defn` comes later in the file.
+* **head-carrying.** `declare` takes the same HEAD a `defn` does minus the
+  body — `(declare ^:method ^I32 odd)` — and builds the identical call
+  closure, because a call shape depends only on the head. Mutual recursion
+  emits, no deferral or anchors are involved, and a name declared and never
+  defined still throws.
+
+**Recommendation: head-carrying**, on the evidence that the strict version
+cannot do the job the ruling gives it. The stated purpose is mutual
+recursion, and `flint`'s `node-assoc`/`coll-assoc` — the pair the namespace
+merge exists to accommodate — call each other in both directions. Under the
+strict reading, merging them into one namespace does not fix them; whichever
+is defined second still fails when the first one's body reaches for it.
+
+The strict version is what is in the tree, so nothing depends on the answer
+yet.
+
+## OPEN — precedence between your own definitions and imported names
+
+**Not decided. Raised with a recommendation, deliberately not settled.**
+
+`form-fn` resolves a head REQUIRES-FIRST, LOCALS-SECOND:
+
+```clojure
+(or (when-let [[vname k] (get scope head)] (get-in ctx [:vocabs vname :forms k]))
+    (get (some-> (:locals ctx) deref) head))
+```
+
+and `define-form!`'s docstring gives the reason: *"a vocabulary name still
+wins, so a file cannot quietly redefine `let` out from under the reader."*
+That was written when a require could only bring in shape forms and subject
+primitives — `let`, `if`, `slot`, `alloc`. Shadowing one of those by accident
+would be a genuine surprise, so requires-first was right.
+
+**C8 changes what a require can contain.** Once requiring a kin namespace
+brings in another module's *function names*, requires-first means an imported
+name beats your own definition in your own file. If `s.a` exports `twice` and
+`s.b` requires `s.a` and also defines its own `twice`, `s.b`'s calls go to
+`s.a`'s — silently, and only in the file that defined its own.
+
+**Recommendation: locals-first.** Three reasons:
+
+* it is what Clojure does — a `def` in your namespace shadows a `:refer`, and
+  the refer is what warns;
+* the surprising direction is the current one. "My own definition lost to an
+  import" is harder to see than "my import lost to my own definition", because
+  the second is visible in the file you are reading;
+* the original reason survives intact for the case it was written for: a
+  source that does not define `let` still gets the vocabulary's, and one that
+  DOES define `let` has said so on the line above.
+
+**Why it is not done here.** It changes resolution for every source, and no
+flint source currently defines a name it also imports, so the change would be
+invisible to `check-kin` — a semantic change with no gate on it is exactly the
+kind this project has been bitten by. It wants either a deliberate decision to
+take it untested, or a source written to exercise it first.
 
 ## What kin owes, after both corrections
 

@@ -98,16 +98,35 @@
 
   `{:key :class :value {...}}`, and `:indent` if the scope indents. Scoped
   rather than global because a form's implementation asks what encloses it --
-  which class, which package, how deep -- and that is a stack, not a variable."
+  which class, which package, how deep -- and that is a stack, not a variable.
+
+  IT USED TO BE A VARIABLE, in spite of that sentence. `assoc-in` meant a
+  nested frame with the same key OVERWROTE the outer one, so an inner class
+  did not shadow its parent -- it erased it. The docstring stated the intent
+  and the code implemented the opposite; it never bit because nothing had yet
+  nested two frames of one key, and nested classes are exactly the case that
+  would. Each key now holds a vector, outermost first."
   [ctx entry f]
   (f (-> ctx
-         (assoc-in [:scope (:key entry)] (:value entry))
+         (update-in [:scope (:key entry)] (fnil conj []) (:value entry))
          (update :indent + (or (:indent entry) 0)))))
 
 (defn get
-  "Read a scoped entry."
+  "The INNERMOST scoped entry for `k`, or nil.
+
+  Unchanged in meaning for every caller: `get` answered the one frame there
+  was, and now answers the nearest of several."
   [ctx k]
-  (clojure.core/get (:scope ctx) k))
+  (peek (clojure.core/get (:scope ctx) k)))
+
+(defn get-all
+  "The whole chain of scoped entries for `k`, OUTERMOST FIRST.
+
+  One frame cannot answer `which class am I in, what encloses that, is the
+  thing I want in an ancestor or a sibling` -- an inner class referencing its
+  parent needs the chain. `get` is the last element of this."
+  [ctx k]
+  (clojure.core/get (:scope ctx) k []))
 
 (defn indent-of
   "One level of indentation per enclosing scope, spelled the way THIS TARGET
@@ -380,34 +399,204 @@
     (when-let [[vname k] (clojure.core/get scope sym)]
       (get-in ctx [:vocabs vname :names k (:target ctx)]))))
 
-(defn declare-name!
-  "Register how `sym` is SPELLED in each target, for a name whose convention is
-  not the local one.
+(def ^:private registries
+  "Where each KIND of definition is kept, locally and for export.
 
-  Constants are the case that forced it. Rust and Java scream (`HASH_TRUE`) and
-  C# pascalises (`HashTrue`), so a reference in the body cannot be rendered by
-  a single rule, and the declaration is the only place that knows. A name not
-  registered here falls back to `local-name`, which is right for everything
-  else."
-  [ctx sym names]
-  (when-let [a (:names ctx)] (swap! a assoc sym names))
-  nil)
+  Three kinds, and the split is load-bearing at both ends already:
+  `require-scope` concats a vocabulary's `:forms`, `:tags` and `:names` when
+  it builds a scope, and a tag can appear where a call cannot -- a parameter
+  list, a return position, a `case` label."
+  {:form {:local :locals  :export :forms}
+   :tag  {:local :local-tags :export :tags}
+   :name {:local :names   :export :names}})
+
+(defn define!
+  "Record a definition of `kind` under `sym`, at the visibility `opts` asks.
+
+      (kin/define-form! ctx {:scope :public}  'merge-two f)
+      (kin/define-tag!  ctx {:scope :private} 'Node      tag)
+      (kin/define-name! ctx {:scope :public}  'CN_BASE   spellings)
+
+  ONE FUNCTION PER KIND, with visibility as an option rather than a second
+  set of functions per visibility -- so it does not double if a third scope
+  ever exists, and the local/export symmetry is structural rather than a
+  convention two APIs happen to share.
+
+  `:public` MEANS LOCAL AND EXPORTED, not exported instead of local. A
+  definition marked public is obviously still callable from its own file, so
+  registration is CUMULATIVE and `:scope` is a MAXIMUM VISIBILITY rather than
+  a destination. The exclusive reading is an easy thing to implement by
+  accident and it fails in the one direction nothing notices: the source
+  itself still generates, and only a caller in the same file breaks.
+
+  WHAT A DEFINITION IS IS THE TARGET'S BUSINESS. `self.merge_two(..)` against
+  `Maps.mergeTwo(..)` is a call shape kin has no basis for choosing, so the
+  target's `defn` builds the value and calls this. kin carries the registries,
+  guarantees exports are visible before any dependent generates, and shapes
+  nothing."
+  [ctx kind {:keys [scope] :or {scope :private}} sym v]
+  (let [{:keys [local export]} (clojure.core/get registries kind)]
+    (when-not local
+      (throw (ex-info (str "kin: there is no definition kind " (pr-str kind))
+                      {:kind kind :known (vec (keys registries))})))
+    ;; LOCAL ALWAYS. A public definition is a local one that is also exported.
+    ;;
+    ;; A DEFINITION FILLS A PLACEHOLDER RATHER THAN REPLACING IT. Anything
+    ;; that already took a reference to the declared name -- a body emitted
+    ;; between the `declare-` and the `define-` -- holds the indirection, so
+    ;; filling the atom is what makes that reference work.
+    (when-let [a (clojure.core/get ctx local)]
+      (if-let [pending (:kin/pending (meta (clojure.core/get @a sym)))]
+        (reset! pending v)
+        (swap! a assoc sym v)))
+    (when (= :public scope)
+      (when-let [a (:exports ctx)] (swap! a assoc-in [export sym] v)))
+    nil))
+
+(defn- placeholder
+  "An indirecting stand-in for a definition that has not arrived yet.
+
+  Exactly `clojure.core/declare` and exactly its failure mode: the NAME
+  resolves, so a body may mention it, and using it before the definition
+  lands throws saying so. `filled` is the atom the real value is put into."
+  [kind sym filled]
+  (fn [& args]
+    (if-let [v @filled]
+      (apply v args)
+      (throw (ex-info
+              (str "kin: `" sym "` was declared and used before it was"
+                   " defined. `declare-" (name kind) "!` reserves the name so"
+                   " a forward reference can resolve; the definition still has"
+                   " to arrive before anything asks it to do work.")
+              {:symbol sym :kind kind})))))
 
 (defn declare!
-  "Register `sym` as callable by later forms in THIS source file.
+  "Reserve `sym` as a forward reference, to be filled by a later `define-`.
+
+  Two mutually recursive functions in ONE namespace need this, the same way
+  Clojure does: `declare` the second, define the first, then define the
+  second. ACROSS namespaces it is not needed and not available -- namespace
+  dependencies form a DAG, so everything a namespace requires is already
+  emitted in full by the time it starts."
+  [ctx kind opts sym]
+  (let [filled (atom nil)]
+    (define! ctx kind opts sym (with-meta (placeholder kind sym filled)
+                                 {:kin/pending filled}))
+    nil))
+
+(defn declare-form! [ctx opts sym] (declare! ctx :form opts sym))
+(defn declare-tag! [ctx opts sym] (declare! ctx :tag opts sym))
+
+(defn define-form!
+  "Define `sym` as CALLABLE -- `(merge-two rt ...)`.
 
   A source has to be able to define a helper and then call it. Without this,
   every helper would have to live in a vocabulary -- and a helper in a
   vocabulary is a helper written once per target, which is the cost this whole
   exercise exists to remove.
 
-  Declarations are FILE-LOCAL and come second: a vocabulary name still wins, so
-  a file cannot quietly redefine `let` out from under the reader. They are also
-  ordered -- a call before the `defn` that declares it is not in scope, the
-  same rule C and Rust modules differ on and the stricter of the two."
-  [ctx sym f]
-  (when-let [a (:locals ctx)] (swap! a assoc sym f))
-  nil)
+  File-local definitions come second in resolution: a vocabulary name still
+  wins, so a file cannot quietly redefine `let` out from under the reader.
+  They are also ordered -- a call before the `defn` that defines it is not in
+  scope, the same rule C and Rust modules differ on and the stricter of the
+  two."
+  [ctx opts sym f]
+  (define! ctx :form opts sym f))
+
+(defn define-tag!
+  "Define `sym` as a TAG -- `^Value`, `^RootIx`, and the tag of a parameter,
+  a binding or a loop variable."
+  [ctx opts sym tag]
+  (define! ctx :tag opts sym tag))
+
+(defn define-name!
+  "Define how `sym` is SPELLED in each target, for a name whose convention is
+  not the local one.
+
+  Constants are the case that forced it. Rust and Java scream (`HASH_TRUE`)
+  and C# pascalises (`HashTrue`), so a reference in the body cannot be
+  rendered by a single rule, and the definition is the only place that knows.
+  A name not defined here falls back to `local-name`, which is right for
+  everything else."
+  [ctx opts sym spellings]
+  (define! ctx :name opts sym spellings))
+
+(defn define!
+  "Record a definition of `kind` under `sym`, at the visibility `opts` asks.
+
+      (kin/define-form! ctx {:scope :public}  'merge-two f)
+      (kin/define-tag!  ctx {:scope :private} 'Node      tag)
+      (kin/define-name! ctx {:scope :public}  'CN_BASE   spellings)
+
+  ONE FUNCTION PER KIND, with visibility as an option rather than a second
+  set of functions per visibility -- so it does not double if a third scope
+  ever exists, and the local/export symmetry is structural rather than a
+  convention two APIs happen to share.
+
+  `:public` MEANS LOCAL AND EXPORTED, not exported instead of local. A
+  definition marked public is obviously still callable from its own file, so
+  registration is CUMULATIVE and `:scope` is a MAXIMUM VISIBILITY rather than
+  a destination. The exclusive reading is an easy thing to implement by
+  accident and it fails in the one direction nothing notices: the source
+  itself still generates, and only a caller in the same file breaks.
+
+  WHAT A DEFINITION IS IS THE TARGET'S BUSINESS. `self.merge_two(..)` against
+  `Maps.mergeTwo(..)` is a call shape kin has no basis for choosing, so the
+  target's `defn` builds the value and calls this. kin carries the registries,
+  guarantees exports are visible before any dependent generates, and shapes
+  nothing."
+  [ctx kind {:keys [scope] :or {scope :private}} sym v]
+  (let [{:keys [local export]} (clojure.core/get registries kind)]
+    (when-not local
+      (throw (ex-info (str "kin: there is no definition kind " (pr-str kind))
+                      {:kind kind :known (vec (keys registries))})))
+    ;; LOCAL ALWAYS. A public definition is a local one that is also exported.
+    ;;
+    ;; A DEFINITION FILLS A PLACEHOLDER RATHER THAN REPLACING IT. Anything
+    ;; that already took a reference to the declared name -- a body emitted
+    ;; between the `declare-` and the `define-` -- holds the indirection, so
+    ;; filling the atom is what makes that reference work.
+    (when-let [a (clojure.core/get ctx local)]
+      (if-let [pending (:kin/pending (meta (clojure.core/get @a sym)))]
+        (reset! pending v)
+        (swap! a assoc sym v)))
+    (when (= :public scope)
+      (when-let [a (:exports ctx)] (swap! a assoc-in [export sym] v)))
+    nil))
+
+(defn define-form!
+  "Define `sym` as CALLABLE -- `(merge-two rt ...)`.
+
+  A source has to be able to define a helper and then call it. Without this,
+  every helper would have to live in a vocabulary -- and a helper in a
+  vocabulary is a helper written once per target, which is the cost this whole
+  exercise exists to remove.
+
+  File-local definitions come second in resolution: a vocabulary name still
+  wins, so a file cannot quietly redefine `let` out from under the reader.
+  They are also ordered -- a call before the `defn` that defines it is not in
+  scope, the same rule C and Rust modules differ on and the stricter of the
+  two."
+  [ctx opts sym f]
+  (define! ctx :form opts sym f))
+
+(defn define-tag!
+  "Define `sym` as a TAG -- `^Value`, `^RootIx`, and the tag of a parameter,
+  a binding or a loop variable."
+  [ctx opts sym tag]
+  (define! ctx :tag opts sym tag))
+
+(defn define-name!
+  "Define how `sym` is SPELLED in each target, for a name whose convention is
+  not the local one.
+
+  Constants are the case that forced it. Rust and Java scream (`HASH_TRUE`)
+  and C# pascalises (`HashTrue`), so a reference in the body cannot be
+  rendered by a single rule, and the definition is the only place that knows.
+  A name not defined here falls back to `local-name`, which is right for
+  everything else."
+  [ctx opts sym spellings]
+  (define! ctx :name opts sym spellings))
 
 (defn- form-fn
   "The implementation of `head` for this context's target, or nil.
@@ -463,12 +652,6 @@
   [ctx sym]
   (clojure.core/get (some-> (:local-tags ctx) deref) sym))
 
-(defn declare-tag!
-  "Record that `sym` -- a parameter, a binding, a loop variable -- has `tag`."
-  [ctx sym tag]
-  (when-let [a (:local-tags ctx)] (swap! a assoc sym tag))
-  nil)
-
 (defn literal-tag
   "The tag a bare literal carries, asked of the source's vocabularies.
 
@@ -514,7 +697,7 @@
         sub (-> ctx
                 (assoc :out (new-sink))
                 (assoc :product product)
-                (assoc-in [:scope :position] :expression))
+                (update-in [:scope :position] (fnil conj []) :expression))
         written (:tag (meta form))]
     (dispatch sub form)
     {:text (resolve-sink (deref (:out sub)))
@@ -564,8 +747,8 @@
   (let [a (emit-anchor! ctx)
         sub (-> ctx
                 (assoc :out (new-sink))
-                (assoc-in [:scope :kin/stmt-anchor] a)
-                (assoc-in [:scope :position] position))]
+                (update-in [:scope :kin/stmt-anchor] (fnil conj []) a)
+                (update-in [:scope :position] (fnil conj []) position))]
     (dispatch sub form)
     (emit! ctx (resolve-sink (deref (:out sub))))))
 

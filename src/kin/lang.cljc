@@ -77,6 +77,16 @@
          (< (+ at (count k)) (inc (count tmpl)))
          (contains? #{\) \, \]} (nth tmpl (+ at (count k)) \space)))))
 
+(defn need!
+  "Say that the file being emitted needs `what` in scope.
+
+  DATA, not text: the form describes what it needs and the target's `:emit`
+  formats the header. A target that opened no `:needs` frame gets nothing,
+  which is right -- a project splicing regions has no header to add to."
+  [ctx what]
+  (when-let [needs (kin/get ctx :needs)] (swap! needs conj what))
+  nil)
+
 (defn fill
   "Fill `tmpl` with argument texts that have ALREADY been rendered.
 
@@ -231,13 +241,37 @@
       ;; other two, so a body that says `(. rt gc)` comes out as `self.gc`
       ;; there and `rt.gc` here. Registering the NAME is all that takes.
       (when recv
-        (kin/declare-name!
-         ctx recv (if on-inst?
+        (kin/define-name!
+         ctx {:scope :private} recv (if on-inst?
                     {:rust "self" :java "this" :csharp "this"}
                     {:rust "self" :java (str recv) :csharp (str recv)})))
-      (kin/declare!
-       ctx nm
-       (fn [c f]
+      ;; PUBLIC when the source says `^:pub`, and that means local AND
+      ;; exported -- a `^:pub` function is obviously still callable from its
+      ;; own file. `:scope` is a maximum visibility, not a destination.
+      ;; WHERE THIS DEFINITION LIVES, captured now so the call can compare.
+      ;;
+      ;; Not which kin namespace -- the EMITTED structure. A target's `:emit`
+      ;; pushes a `:kin/unit` frame naming the class or module it is opening,
+      ;; and a call compares that frame against this one: same, self-
+      ;; reference; different, an absolute reference plus the import it needs.
+      ;;
+      ;; ONE FUNCTION, and every form asks -- including private ones, which
+      ;; simply always get the same answer, because nothing can call them from
+      ;; another unit. kin has no branch for this and invents no reference: a
+      ;; target that pushes no `:kin/unit` gets nil on both sides and
+      ;; self-references always, which is what a project generating regions
+      ;; did before any of this existed.
+      (kin/define-form!
+       ctx {:scope (if pub? :public :private)} nm
+       ;; The unit a target would open for THIS namespace. Asked of the
+       ;; target rather than read from the scope, because a definition is
+       ;; registered during the scan -- before any `:emit` has run and before
+       ;; any frame exists. A target computes it from the namespace exactly as
+       ;; it computes `:path`, so the two sides agree by construction.
+       (let [home (or (kin/get ctx :kin/unit)
+                      (when-let [f (get-in ctx [:targets (t ctx) :unit])]
+                        (f (:kin/ns ctx))))]
+        (fn [c f]
          ;; A GENERATED FUNCTION REGISTERS ITS OWN RETURN TAG. It already
          ;; states one -- `defn ^Value cn-key` -- so a later call to it in the
          ;; same file carries that tag with no further annotation. This is the
@@ -250,14 +284,29 @@
          ;; other side: a declared call has no template to inspect, but its
          ;; shape guarantees what a template would have to prove.
          (let [as (mapv (fn [x] (strip-parens (kin/render c x))) (rest f))
+               here (kin/get c :kin/unit)
+               ;; A RUST METHOD IS THE SAME EVERYWHERE: both halves are
+               ;; methods on one type, and a crate may have several inherent
+               ;; `impl` blocks. So `elsewhere?` only bites in the two
+               ;; languages that put a function inside a class.
+               elsewhere? (and home here (not= home here))
+               qualified (fn [nm-str]
+                           (if (and elsewhere? (not= :rust (t c)))
+                             (do (need! c home) (str home "." nm-str))
+                             nm-str))
                code (str (if (or on-inst? (and method? (= :rust (t c))))
                            (str (first as) "." (target-name c nm)
                                 "(" (str/join ", " (rest as)) ")")
-                           (str (target-name c nm) "(" (str/join ", " as) ")"))
+                           (str (qualified (target-name c nm))
+                                "(" (str/join ", " as) ")"))
                          (if (and throws? (= :rust (t c))) "?" ""))]
            (if (= :statement (kin/position c))
              (kin/emit! c (kin/indent-of c) code ";\n")
-             (kin/emit! c code)))))
+             (kin/emit! c code))))))
+      ;; EXPORTED when the source says `^:pub`, and only then. A file is full
+      ;; of helpers that are nobody else's business, and without a gate every
+      ;; one of them would leak and the module boundary would mean nothing.
+      ;; `^:pub` already exists and already means `part of the API`.
       ;; `^:inline`. Rust is the only one that says so in the source; the JVM
       ;; and the CLR decide at run time from profile data, which is strictly
       ;; more information than a source can have. So the mark is emitted for
@@ -341,7 +390,7 @@
               declared (kin/tag ctx (:tag (meta nm)))
               tag (or declared produced)
               ty (get-in (or tag default) [:types (t ctx)])
-              _ (kin/declare-tag! ctx nm tag)]
+              _ (kin/define-tag! ctx {:scope :private} nm tag)]
           (kin/emit! ctx (kin/indent-of ctx)
                            ;; `^:mut` on a LOCAL, for the same reason it is on
                            ;; a parameter: Rust alone has to say that a binding
@@ -371,7 +420,7 @@
     (let [nm (second form)
           tag (kin/tag ctx (:tag (meta nm)))
           ty (get-in (or tag default) [:types (t ctx)])
-          _ (kin/declare-tag! ctx nm tag)
+          _ (kin/define-tag! ctx {:scope :private} nm tag)
           n (kin/local-name ctx nm)]
       (kin/emit! ctx (kin/indent-of ctx)
                     (case (t ctx)
@@ -388,6 +437,14 @@
     (let [[_ nm fields] form
           fs (mapv (fn [f] [f (:tag (meta f))]) fields)
           pascal (str/join (mapv str/capitalize (str/split (str nm) #"-")))]
+      ;; A STRUCT DEFINES A TAG. It is a type, so it belongs in the tag
+      ;; registry and -- when `^:pub` -- in the namespace's exported tags,
+      ;; which is what makes a struct usable from another kin namespace at
+      ;; all. It is also the only way a kin namespace can currently define a
+      ;; tag, and therefore the only way a TAG CYCLE can be constructed.
+      (kin/define-tag! ctx {:scope (if (:pub (meta nm)) :public :private)} nm
+                       {:name nm :types (zipmap (keys (:targets ctx))
+                                                (repeat pascal))})
       (case (t ctx)
         :rust (do (kin/emit! ctx (kin/indent-of ctx) "struct " pascal " {\n")
                   (doseq [[f tag] fs]
@@ -572,7 +629,7 @@
           [nm start end] binding
           tag (kin/tag ctx (:tag (meta nm)))
           ty (get-in (or tag default) [:types (t ctx)])
-          _ (kin/declare-tag! ctx nm tag)
+          _ (kin/define-tag! ctx {:scope :private} nm tag)
           n (kin/local-name ctx nm)
           a (strip-parens (kin/render ctx start))
           b (strip-parens (kin/render ctx end))]
@@ -704,7 +761,7 @@
         pub? (:pub (meta nm))
         cn (const-name (t ctx) nm)
         tag (kin/tag ctx (:tag (meta nm)))
-        _ (kin/declare-tag! ctx nm tag)
+        _ (kin/define-tag! ctx {:scope :private} nm tag)
         ty (get-in tag [:types (t ctx)])
         ;; The SOURCE says whether a constant is written in hex, by wrapping
         ;; it in `(hex ...)` or not. Deriving it from the value produced
@@ -717,8 +774,8 @@
        :rust (str (when pub? "pub ") "const " cn ": " ty " = " lit ";\n")
        :java (str (if pub? "public " "") "static final " ty " " cn " = " lit ";\n")
        :csharp (str (if pub? "public " "") "const " ty " " cn " = " lit ";\n")))
-    (kin/declare-name!
-     ctx nm (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))))
+    (kin/define-name!
+     ctx {:scope (if pub? :public :private)} nm (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))))
 
 (defn forms
   "The shape forms. `:default-tag` is the tag an untagged name is given, which
@@ -738,6 +795,16 @@
     'case case-form 'defconst defconst-form
     'local (local-form default-tag)
     'for (for-form default-tag) 'while while-form 'forever forever-form
+    ;; `(declare foo bar)` -- a FORWARD REFERENCE within this namespace.
+    ;;
+    ;; Two mutually recursive functions in one file need it, the same way
+    ;; Clojure does. Across namespaces it is neither needed nor available:
+    ;; dependencies form a DAG, so everything a namespace requires is already
+    ;; emitted in full before it starts.
+    'declare (fn [ctx form]
+               (doseq [nm (rest form)]
+                 (kin/declare-form!
+                  ctx {:scope (if (:pub (meta nm)) :public :private)} nm)))
     'break (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "break;\n"))
     'continue (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "continue;\n"))
     'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))}

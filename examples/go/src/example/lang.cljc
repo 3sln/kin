@@ -62,7 +62,7 @@
   [ctx form]
   (let [[_ nm params & body] form
         ret (:tag (meta nm))]
-    (kin/declare!
+    (kin/define-form!
      ctx nm
      (fn [c f]
        (kin/tagged! c (kin/tag c ret))
@@ -97,7 +97,7 @@
      ctx {:key :fn :value nm :indent 1}
      (fn [inner]
        (doseq [p params]
-         (kin/declare-tag! inner p (kin/tag inner (:tag (meta p)))))
+         (kin/define-tag! inner {:scope :private} p (kin/tag inner (:tag (meta p)))))
        (doseq [f body] (kin/statement! inner f))))
     (kin/emit! ctx (kin/indent-of ctx) "}\n")))
 
@@ -126,7 +126,7 @@
         ;; An unannotated binding takes its initialiser's tag, which in Go is
         ;; also what `:=` does -- so the source needs no annotation and the
         ;; output needs no type.
-        (kin/declare-tag! ctx nm (or (kin/tag ctx (:tag (meta nm))) tag))
+        (kin/define-tag! ctx {:scope :private} nm (or (kin/tag ctx (:tag (meta nm))) tag))
         ;; Go's `:=` declares AND infers; Java needs the type written out, and
         ;; the tag is what supplies it. Same source, and the inference kin
         ;; already does is what makes the Java possible without an annotation.

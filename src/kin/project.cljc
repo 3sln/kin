@@ -149,6 +149,115 @@
   [prj]
   (into (sorted-map) (map (fn [l] [l (source-text prj l)])) (source-labels prj)))
 
+;; ------------------------------------------------------------- exports
+;;
+;; A KIN NAMESPACE EXPORTS, so requiring one is enough.
+;;
+;; Without this, a function generated in one source and called from another
+;; has to be re-declared in a vocabulary with its per-target spelling -- one
+;; definition kept in two places, which is the drift this project keeps
+;; finding bugs in. `define-form!` already makes the same argument one scope
+;; down, for calls within a file.
+;;
+;; ORDERING: KIN FOLLOWS CLOJURE. Namespace dependencies form a DAG, so there
+;; is a topological order, and emitting in it means every namespace's exports
+;; are complete before any dependent starts. B is emitted in FULL -- bodies
+;; and all -- before A begins, so A's calls resolve against finished exports.
+;;
+;; That is one pass, and it dissolves a problem rather than surviving it.
+;; Three earlier designs -- a tolerant collecting pass, a scan flag on the
+;; context, deferred resolution of cross-namespace calls -- existed only to
+;; survive cycles, and each traded away the strictness that has caught real
+;; bugs here. Resolution stays STRICT: an unresolved symbol is an error where
+;; it is read. Nothing is derived from a signature, and there is no mode in
+;; which a symbol may quietly resolve to nothing.
+;;
+;; Within a namespace, `declare-form!` and `declare-tag!` allow a forward
+;; reference the same way `clojure.core/declare` does, with the same failure.
+
+(defn parse-source
+  "A source's `ns` form and top-level forms, without a require scope.
+
+  Used only to build the dependency graph -- which namespace requires which
+  -- before anything is emitted. It reads the `ns` form and nothing else."
+  [text]
+  (let [all (edn/read-string {:readers {}} (str "[" text "]"))]
+    {:ns (first (filter #(and (seq? %) (= 'ns (first %))) all))}))
+
+(defn- requires-of
+  "The namespaces a source requires, in order."
+  [ns-form]
+  (mapv first (kin/require-specs ns-form)))
+
+(defn require-order
+  "Every source label, in an order where a namespace comes after everything it
+  requires. Refuses a cycle, naming the loop.
+
+  Only KIN namespaces constrain the order: a hand-written vocabulary is a
+  value that exists before anything is emitted and can never be part of a
+  cycle."
+  [labelled]
+  (let [by-ns (into {} (for [[label {:keys [ns]}] labelled :when ns] [(second ns) label]))
+        deps (into {} (for [[label {:keys [ns]}] labelled :when ns]
+                        [label (filterv some? (map by-ns (requires-of ns)))]))
+        order (atom [])
+        state (atom {})]
+    (letfn [(visit [label path]
+              (case (clojure.core/get @state label)
+                :done nil
+                :open (let [loop-part (conj (vec (drop-while #(not= % label) path)) label)]
+                        (throw (ex-info
+                                (str "kin: these namespaces require each other in a"
+                                     " loop -- "
+                                     (str/join " -> " (map #(str (second (:ns (clojure.core/get labelled %))))
+                                                           loop-part))
+                                     ". kin follows Clojure: namespace dependencies form"
+                                     " a DAG. Two namespaces that call each other are"
+                                     " two halves of one thing and belong in one"
+                                     " namespace.")
+                                {:cycle (mapv #(second (:ns (clojure.core/get labelled %))) loop-part)
+                                 :labels loop-part})))
+                (do (swap! state assoc label :open)
+                    (doseq [d (clojure.core/get deps label)] (visit d (conj path label)))
+                    (swap! state assoc label :done)
+                    (swap! order conj label))))]
+      (doseq [label (sort (keys labelled))] (visit label [])))
+    @order))
+
+(defn- export-vocabulary
+  "One kin namespace's exports, AS A VOCABULARY.
+
+  This is the whole trick and it is why `require-scope` needs no change:
+  requiring `runtime.merge` goes down the identical path as requiring
+  `flint.impl.rt`, so `:refer`, aliases, first-match-wins and `why`'s
+  attribution all work already. If this ever needs a second resolution path,
+  something has gone wrong."
+  [ns-name kinds]
+  (let [targets-of (fn [by-sym] (set (mapcat keys (vals by-sym))))
+        ;; A FORM dispatches on the target at CALL time, so an export built
+        ;; while generating one target is never used by another.
+        forms (into {}
+                    (for [[sym by-target] (clojure.core/get kinds :forms)]
+                      [sym (fn [ctx form]
+                             (if-let [f (clojure.core/get by-target (:target ctx))]
+                               (f ctx form)
+                               (throw (ex-info
+                                       (str "kin: " ns-name "/" sym
+                                            " is not exported for " (:target ctx))
+                                       {:namespace ns-name :symbol sym
+                                        :target (:target ctx)}))))]))
+        ;; A TAG and a NAME are DATA, and the same data whichever target was
+        ;; being emitted when they were recorded -- a tag carries its own
+        ;; per-target `:types`, a name its own per-target spellings.
+        plain (fn [k] (into {} (for [[sym by-target] (clojure.core/get kinds k)]
+                                 [sym (val (first by-target))])))]
+    {:namespace ns-name
+     :targets (into (targets-of (clojure.core/get kinds :forms {}))
+                    (targets-of (clojure.core/get kinds :tags {})))
+     :forms forms
+     :tags (plain :tags)
+     :names (plain :names)}))
+
 ;; ---------------------------------------------------------------- analysis
 
 (defn analyse
@@ -223,12 +332,19 @@
   [prj analysis target]
   (let [ctx (assoc (kin/context {} target)
                    :vocabs (:vocabularies prj)
+                   ;; WHICH NAMESPACE IS BEING EMITTED. A target computes its
+                   ;; unit name from this exactly as it computes its `:path`,
+                   ;; which is what lets a definition know where it lives
+                   ;; during the SCAN -- when no `:emit` has run and no unit
+                   ;; frame has been pushed.
+                   :kin/ns (:ns-name analysis)
                    :scope-syms (:scope analysis)
                    ;; The order the source REQUIRED its vocabularies in, so
                    ;; `literal-tag` can ask them first-match-first -- the same
                    ;; rule the require scope resolves by.
                    :vocab-order (:required (:report analysis))
                    :targets (:targets prj)
+                   :exports (:exports-atom prj)
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))]
     (if-let [emit (get-in prj [:targets target :emit])]
@@ -246,6 +362,62 @@
   ([prj text label]
    (let [a (analyse prj text label)]
      (into {} (map (fn [t] [t (render prj a t)])) (:emit-for a)))))
+
+(defn generate-in-order
+  "Every source, emitted ONCE, in dependency order.
+
+  `{:order [label ...] :generated {label {target text}} :project prj'}`.
+
+  This is the whole of the export mechanism's machinery. A namespace's
+  exports are a BY-PRODUCT of emitting it: the target's `defn` calls
+  `define-form!` as it goes, and what it registers publicly becomes a
+  vocabulary the moment that namespace is finished. Emitting in dependency
+  order is what makes that enough -- everything a source requires has already
+  been emitted, so its exports are complete rather than half-built.
+
+  One pass. There is no scan, no collecting mode, and no point at which an
+  unresolved symbol is tolerated."
+  [prj entries]
+  (let [labelled (into {} (for [{:keys [label text]} entries]
+                            [label (assoc (parse-source text) :text text)]))
+        order (require-order labelled)]
+    (reduce
+     (fn [acc label]
+       (let [{:keys [text ns]} (clojure.core/get labelled label)
+             prj (:project acc)
+             a (analyse prj text label)
+             ;; ONE EXPORT REGISTRY PER TARGET, because what a definition
+             ;; exports is the TARGET's call shape -- `self.merge_two(..)`
+             ;; against `Maps.mergeTwo(..)`. Sharing one atom across targets
+             ;; would leave whichever ran last standing for all of them.
+             per-target (atom {})
+             out (into {} (map (fn [t]
+                                 (let [ex (atom {:forms {} :tags {} :names {}})
+                                       text (render (assoc prj :exports-atom ex) a t)]
+                                   (swap! per-target assoc t @ex)
+                                   [t text])))
+                       (:emit-for a))
+             ;; {target {kind {sym v}}} -> {kind {sym {target v}}}
+             exports (atom (reduce-kv
+                            (fn [m t kinds]
+                              (reduce-kv (fn [m k by-sym]
+                                           (reduce-kv (fn [m sym v]
+                                                        (assoc-in m [k sym t] v))
+                                                      m by-sym))
+                                         m kinds))
+                            {} @per-target))]
+         (-> acc
+             (assoc-in [:generated label] out)
+             (update :order conj label)
+             ;; The namespace is finished, so what it made public IS a
+             ;; vocabulary now. Every later namespace resolves against it the
+             ;; same way it resolves a hand-written one.
+             (assoc :project
+                    (cond-> prj
+                      ns (assoc-in [:vocabularies (second ns)]
+                                   (export-vocabulary (second ns) @exports)))))))
+     {:order [] :generated {} :project prj}
+     order)))
 
 ;; -------------------------------------------------------------------- emit
 ;;
@@ -333,13 +505,15 @@
   saw, which is the tree with A already in it. Accumulate first, write once,
   and the question does not arise."
   [prj entries]
-  (let [plans (mapv (fn [{:keys [label text]}]
-                      (let [a (analyse prj text label)]
+  ;; PHASE 1, in DEPENDENCY ORDER and once per namespace. A form not in scope
+  ;; or an undeclared constant throws here, having written nothing -- and a
+  ;; namespace's exports are complete before anything requiring it starts.
+  (let [{:keys [generated project]} (generate-in-order prj entries)
+        plans (mapv (fn [{:keys [label text]}]
+                      (let [a (analyse project text label)]
                         {:label label :ns-name (:ns-name a)
                          :emit-for (:emit-for a)
-                         ;; PHASE 1. A form not in scope or an undeclared
-                         ;; constant throws here, having written nothing.
-                         :generated (generate prj text label)}))
+                         :generated (clojure.core/get generated label)}))
                     entries)
         regions (for [p plans
                       t (:emit-for p)
@@ -470,6 +644,19 @@
   (let [{:keys [emitted staged]} (stage prj entries)]
     (write-staged! staged)
     emitted))
+
+(defn resolve-exports
+  "The project, with every kin namespace's exports available as a vocabulary.
+
+  Emits each namespace once, in dependency order, and keeps the exports. The
+  generated text is discarded here -- `emit-sources!` does its own pass and
+  keeps it -- so this exists for callers that want to generate ONE source and
+  need what it requires to be resolvable first."
+  [prj]
+  (:project (generate-in-order
+             prj
+             (mapv (fn [l] {:label l :text (source-text prj l)})
+                   (source-labels prj)))))
 
 (defn emit!
   "Emit ONE source, atomically over its targets.
