@@ -544,6 +544,92 @@ afterwards becomes optional rather than load-bearing -- and `cn_copy_set_val`
 is 23 lines needing nothing kin lacks, so it is a cheap follow-up whenever it
 is wanted.
 
+### C8 — kin namespaces EXPORT, so requiring one is enough
+
+Proposed by the author:
+
+> Maybe we should have a concept for allowing a kin target to automate linking
+> between kin modules? For example in a defn or def we can register (in the
+> 'context') an export form or an export tag, like `(reg-ns-tag! context ...)`
+> or `(reg-ns-form! context ...)`. Then, when a kin module/namespace requires
+> another kin namespace, they already know how to talk. The exported forms
+> need to know how to add their requirements (including import for the thing
+> they're defined in if needed) to the dependent; just like a normal form.
+
+**Yes, and kin already makes this argument one scope short.** `kin-declare!`
+registers a `defn` as callable by later forms in THE SAME FILE, and its
+docstring gives the reason:
+
+> Without this, every helper would have to live in a vocabulary -- and a
+> helper in a vocabulary is a helper written once per target, which is the
+> cost this whole exercise exists to remove.
+
+That is the proposal, at namespace scope. And the cost it names is already
+being paid: of the 30 forms `flint.impl.rt` declares with `own`, **27 are
+functions kin itself generates**. `merge-two` is defined in `merge.kin` and
+re-declared in the vocabulary with its per-target spelling -- one definition
+kept in two places, which is the drift this project keeps finding bugs in.
+
+Prediction, so the result is checkable: with exports, `flint.impl.rt` should
+lose those 27 and keep only what kin does not define -- the primitives
+(`slot`, `alloc`, `push`, `mark`) and the three host functions from the plan
+above.
+
+#### `^:pub` is the gate, and it already exists
+
+Not every `defn` should export. `lang.cljc` already reads `^:pub` on `defn`
+and `defconst`, and a source is full of helpers that are nobody else's
+business. Export the marked ones; leave the rest file-local exactly as
+`kin-declare!` has them now. Without this every helper leaks and the module
+boundary means nothing.
+
+#### It composes with the import anchor, and that is the evidence it fits
+
+"The exported forms need to know how to add their requirements to the
+dependent; just like a normal form" is the pattern from `:emit` above: the
+form contributes data to the dependent's import atom, and `:emit` renders the
+header. An export needs NO new machinery -- it is a form, and forms already do
+this. A design where a new feature needs no new mechanism is usually the right
+shape.
+
+#### The real cost is ORDERING, and it has a cheap answer
+
+If A requires B, B's exports must be known before A is emitted. That is a new
+constraint -- today each source generates independently.
+
+The obvious answer, emitting in dependency order, is the WRONG one: mutual
+references between modules are legal and ordinary in every target here (same
+crate in Rust, same package in Java and C#), so a cycle is not a user error to
+be refused, and a topological sort has nowhere to start.
+
+The cheap answer is a scan pass. Exports are derivable from a source's `defn`
+and `def` forms WITHOUT emitting their bodies -- a signature is all an export
+needs. So:
+
+    phase 0   scan every source for its ^:pub definitions -> exports
+    phase 1   generate every target of every source, with all exports known
+    phase 2   splice
+    phase 3   write
+
+Cycles stop mattering, because phase 0 does not evaluate anything. This slots
+in ahead of the three phases C6 already defines rather than reshaping them.
+
+#### Why automatic here and manual for host code
+
+The plan above says host code is exposed as kin namespaces MANUALLY. This
+proposal is automatic. That is not a contradiction and the line is worth
+stating: kin knows its own definitions and cannot know anyone else's. Where it
+knows, requiring a hand-written declaration is pure duplication; where it does
+not, a declaration is the only way it can learn.
+
+#### One thing kin must not decide
+
+The export is registered BY THE TARGET'S handling of `defn`, not by kin. The
+call shape is target-specific -- `self.merge_two(...)` against
+`Maps.mergeTwo(...)` -- and kin has no basis for either. kin carries the
+registry and guarantees exports are visible before dependents generate; the
+target decides what an export IS. Same division as everywhere else.
+
 ### The old questions, now answered
 
 
