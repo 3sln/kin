@@ -341,6 +341,23 @@
   [ctx sym]
   ((get-in ctx [:targets (:target ctx) :local-name] (fn [_ s] (str s))) ctx sym))
 
+(defn- constant-shaped?
+  "Does `sym` look like a CONSTANT rather than a local?
+
+  `SCREAMING_SNAKE`, which every target in practice reserves for constants and
+  no local is ever spelled as. The distinction matters because an undeclared
+  symbol falls through to the local namer, and a local namer is exactly the
+  wrong thing for a constant: a local is spelled by convention per target, a
+  constant is spelled however the target's runtime happens to declare it.
+
+  `LS_THUNK` is what that costs. It was not in the name table, so it fell
+  through and emitted `LS_THUNK` into a C# file whose constant is `LsThunk`.
+  The CLR did not compile for the whole of the work that followed, and neither
+  `kin/verify` nor the host conformance run said so."
+  [sym]
+  (let [s (str sym)]
+    (and (> (count s) 1) (some? (re-matches #"[A-Z][A-Z0-9_]*" s)))))
+
 (defn literal
   "A non-form: a symbol, a number, a string, a boolean."
   [ctx v]
@@ -348,6 +365,15 @@
     (string? v) (pr-str v)
     (symbol? v) (or (vocab-name ctx v)
                     (get-in (some-> (:names ctx) deref) [v (:target ctx)])
+                    (when (constant-shaped? v)
+                      (throw (ex-info
+                              (str "kin: `" v "` is constant-shaped but is not a"
+                                   " declared name. Add it to the subject's name"
+                                   " table saying how each target spells it --"
+                                   " passing it through verbatim is only right"
+                                   " when every target agrees, and that is a"
+                                   " thing to state rather than to assume.")
+                              {:symbol v :target (:target ctx)})))
                     (local-name ctx v))
     (nil? v) (or (kin-get ctx :nil) "null")
     :else (str v)))
