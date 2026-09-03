@@ -74,6 +74,84 @@ Two consequences worth designing for rather than discovering:
 > case. The EDN reader preserves metadata on both lists and symbols, so
 > nothing had to change about reading.
 
+## C4 — kin is a LIBRARY. `bin/kin` should not exist.
+
+Verbatim:
+
+> Why is there a `bin/kin` at all, I expected kin to be exposed as a library,
+> not a cli. The actual script should be in our own code. That's why my
+> original proposal included a `:vfs` (virtual file system) protocol impl for
+> each target.
+
+This is the answer to "how does kin touch the filesystem", and it is not the
+one the code gives today. `bin/kin` is 503 lines and nearly all of it is
+LIBRARY LOGIC sitting in a script:
+
+    load-vocabulary  read-source  generate
+    destination  splice  block-lines  emit  destinations
+    symbols-in  bound-names  kind-of  why
+    wrapped  targets-report
+
+Only two things in that file are genuinely a command-line tool: reading
+`kin.edn` off disk, and the `*command-line-args*` dispatch at the bottom.
+Everything else belongs in `src/kin/`, and the script belongs in the CONSUMER'S
+tree — flint already has `kin/gen`, `kin/emit` and `kin/verify` wrappers that
+would call the library directly instead of shelling to `bb ../kin/bin/kin`.
+
+The recent work went the WRONG WAY on this, and deliberately, for a reason
+that was good and an aim that was wrong: splicing moved out of a shell script
+into `bin/kin` because a shell loop cannot call a namespace-to-path function.
+That reasoning holds. The conclusion should have been "splicing is library
+code", not "splicing goes in the CLI".
+
+### The `:vfs`, which is why this matters
+
+kin must not know what a filesystem is. Each target carries a vfs
+implementation the user supplies:
+
+```clojure
+{:key  :rust
+ :ext  "rs"
+ :vfs  (->DiskVfs "runtime/src")     ; a protocol impl, from the USER
+ :path (fn [ns] ...)
+ :wrap ...}
+```
+
+An in-memory vfs then makes emit testable without touching a disk, a
+ClojureScript project can supply a Node one, and kin stops being
+babashka-only — which it is today, `.cljc` extension notwithstanding, because
+`bin/kin` reaches for `java.io.File` and `babashka.fs` directly.
+
+Shape to settle with the author, since "protocol impl" was said but the
+operations were not:
+
+```clojure
+(defprotocol Vfs
+  (-exists? [this path])
+  (-read    [this path])
+  (-write   [this path content]))
+```
+
+### What this implies for the library's surface
+
+The most library-shaped split, and the one to aim at:
+
+* `generate` takes SOURCE TEXT and config and returns `{target text}`. Pure.
+  It does not open the source file; the caller does.
+* `emit!` uses each target's vfs to read the destination, splice the region,
+  and write it back. The only I/O kin performs, and all of it through the
+  user's implementation.
+* `why` and `targets-report` return DATA. Printing is the caller's business,
+  which is what makes them usable from something other than a terminal.
+
+### And one thing kin cannot do at all
+
+`verify` compiles the generated code with `rustc`, `javac` and `dotnet`, and
+runs it. That is PROCESS EXECUTION, not filesystem, and no vfs abstracts it.
+It belongs in the consumer's tree and always did. Worth stating plainly so the
+three layers are visible: `generate` is pure, `emit!` needs a vfs, and
+`verify` needs a machine.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:
