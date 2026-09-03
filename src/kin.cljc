@@ -341,10 +341,20 @@
   Only dashed names are touched, so a constant like `SEED` passes through
   whatever the target says."
   [ctx sym]
-  (let [s (str sym)]
-    (if-not (clojure.string/includes? s "-")
+  (let [t (get-in ctx [:targets (:target ctx)])
+        s (str sym)
+        s (if (clojure.string/includes? s "-") ((:local-name t identity) s) s)]
+    (if-not (contains? (:reserved t) s)
       s
-      ((get-in ctx [:targets (:target ctx) :local-name] identity) s))))
+      (if-let [esc (:escape t)]
+        (esc s)
+        ;; No escape and no rename is a name that cannot compile. Refusing
+        ;; here names the source, the target and the word; the alternative is
+        ;; a build error in generated code, which is a worse place to learn it.
+        (throw (ex-info (str "kin: `" s "` is a reserved word in "
+                            (name (:target ctx)) ", which has no escape -- "
+                            "rename it in the source")
+                        {:name s :target (:target ctx)}))))))
 
 (defn literal
   "A non-form: a symbol, a number, a string, a boolean."

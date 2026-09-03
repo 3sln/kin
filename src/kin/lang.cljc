@@ -249,9 +249,12 @@
                  :else "")
                " {\n")
         :java (sp/kin-emit!
-               ctx (sp/indent-of ctx) (if pub? "public static " "static ")
+               ctx (sp/indent-of ctx)
+               (cond on-inst? (if pub? "public " "")
+                     pub? "public static " :else "static ")
                (if ret (ty ret) "void") " " (target-name ctx nm) "("
-               (str/join ", " (cons* (when recv (str (ty (:tag (meta recv))) " " recv))
+               (str/join ", " (cons* (when (and recv (not on-inst?))
+                                       (str (ty (:tag (meta recv))) " " recv))
                                      (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n")
         :csharp (sp/kin-emit!
                  ctx (sp/indent-of ctx)
