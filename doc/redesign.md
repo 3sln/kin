@@ -3,6 +3,72 @@
 Five, in the order they should be answered. The first is the sharpest because
 a concrete constraint rules out the obvious reading.
 
+## 0. A FORM HAS TWO CONCERNS: how to use it, and how to produce it
+
+The author, on the design we had converged to:
+
+> What we have now means, in order to reference/use things from a namespace,
+> we need to regenerate/emit it. That seems wrong. It's two separate concerns:
+> how do I use the thing you produce, and how should it be produced.
+>
+> So I think we do need a form to implement two separate concerns, so it
+> breaks into two functions not one. The first is the 'how do I use the thing
+> you produced from this form, in an external namespace'; most forms will have
+> no impl for this, but 'defn', 'def' will. The other question is 'how should
+> this form emit to generate the thing'? Maybe the first question is optional
+> metadata on the form fn?
+
+Right, and the argument is separation of concerns rather than mechanism, which
+makes it stronger: depending on B should not mean rebuilding B. B may be
+vendored, already generated, or simply unchanged.
+
+### It rescues `heads-only`, in the shape that works
+
+I retracted heads-only after framing it as "kin scans heads", which kin cannot
+do -- it has no idea what a `defn` is. This fixes precisely that. THE FORM
+IMPLEMENTATION supplies the use-half, so kin never needs to know what it is
+looking at; it invokes what the target wrote.
+
+    scanning B    for each top-level form, look up its implementation and call
+                  the USE half if it has one. Nothing emitted, no body read.
+    emitting A    `merge-two` resolves to that entry, invoked with A's CONTEXT,
+                  so it does the same-module check and registers its import
+                  there.
+
+The second line is the subtle one: **the use-function runs in the DEPENDENT's
+context**, not the definer's. It is the same call-emitter `define-form!` would
+have registered -- obtained without emission.
+
+### Two decisions, not defaults
+
+**Metadata on the fn, or a map?** Metadata is lighter and leaves a bare
+function working. A map -- `{:emit f :use g}` -- is discoverable and
+checkable: kin can say "this entry has a `:use` that is not a function". Take
+the map, for the same reason vocabularies became maps. Things kin must check
+should be visible to it.
+
+**Does the scan need B's require scope?** For name and arity, no -- both are
+in the param vector. For a RETURN TAG, yes, since the tag resolves through B's
+requires. So scanning B needs B's requires scanned first, which the DAG
+already provides. Worth stating, because it means exports cannot be built from
+a lone file and someone will assume they can.
+
+### The two-level story this produces
+
+    inter-namespace   SCAN based -- `:use`, no emission, DAG ordered
+    intra-namespace   PROMISE based -- forward references within one file
+
+The promise machinery stops having to carry the cross-namespace case at all.
+Its scope narrows to exactly the `(declare foo)` problem it was introduced
+for.
+
+### And it permits something the old design forbade
+
+Once exports come from a scan, an export vocabulary is a VALUE. It can be
+cached, or persisted, or vendored by a downstream project that never has B's
+sources. Not required now; worth knowing the design allows it, because
+emit-to-learn structurally did not.
+
 ## 1. THE EMIT MODEL IS WRONG: nodes must be promises
 
 Settled by the author, and it supersedes the two options below.
