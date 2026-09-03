@@ -486,15 +486,38 @@
 
   This is what item 5 exists for. A form that wants to know what its argument
   IS -- rather than only what it says -- calls this instead of `kin-render`,
-  and gets a tag it may use, ignore, or refuse."
+  and gets a tag it may use, ignore, or refuse.
+
+  A TAG WRITTEN AT THE CALL SITE WINS (correction C1b):
+
+      (foo ^MyTag (bar ...) ^MyOtherTag (baz ...))
+
+  reaches `foo` as two arguments carrying `MyTag` and `MyOtherTag`, whatever
+  `bar` and `baz` say their products are. An argument's tag has two sources --
+  what the inner form declares, and an annotation here -- and the explicit one
+  wins. It is the escape hatch that makes the scheme usable: a form cannot
+  always know what it produced, and the caller often can.
+
+  The annotation is read HERE, where the argument is rendered, rather than
+  where the form is resolved, because it belongs to the argument.
+
+  AN UNDECLARED TAG IS CARRIED, NOT REFUSED. If `^MyTag` resolves through the
+  file's require scope it arrives as that tag's value; if it resolves to
+  nothing it arrives as the bare symbol. kin does not ask whether a tag is
+  declared, what it means, or whether it is compatible with anything --
+  carrying it from where it was written to the form that receives it is the
+  entire job, and what a form does with a tag it has never heard of is that
+  form's business."
   [ctx form]
   (let [product (atom nil)
         sub (-> ctx
                 (assoc :out (new-sink))
                 (assoc :product product)
-                (assoc-in [:scope :position] :expression))]
+                (assoc-in [:scope :position] :expression))
+        written (:tag (meta form))]
     (dispatch sub form)
-    {:text (resolve-sink (deref (:out sub))) :tag @product}))
+    {:text (resolve-sink (deref (:out sub)))
+     :tag (if written (or (kin-tag ctx written) written) @product)}))
 
 (defn kin-render
   "Run `form` into a STRING rather than into the current sink.

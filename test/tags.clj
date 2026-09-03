@@ -16,6 +16,8 @@
 ;;   2. a PARAMETER's `^Tag` reaches a form in the body
 ;;   3. an UNANNOTATED let binding takes its initialiser's tag
 ;;   4. a LITERAL takes whatever the vocabulary's `:literal-tag` says
+;;   5. a tag WRITTEN AT THE CALL SITE overrides the form's own (C1b), and an
+;;      UNDECLARED one is carried rather than refused
 ;;
 ;; and one negative, which is the point of the whole correction: kin does not
 ;; interpret a tag. A form that ignores tags behaves exactly as it did before
@@ -38,7 +40,10 @@
   [ctx form]
   (doseq [a (rest form)]
     (let [{:keys [text tag]} (sp/kin-render-tagged ctx a)]
-      (swap! seen conj [text (:name tag)])))
+      ;; A tag arrives as a vocabulary's tag VALUE, or -- when the call site
+      ;; wrote one that resolves to nothing -- as the bare symbol. kin carries
+      ;; whichever it was given.
+      (swap! seen conj [text (if (map? tag) (:name tag) tag)])))
   (sp/kin-emit! ctx (sp/indent-of ctx) "reported;\n"))
 
 (def vocabulary
@@ -120,8 +125,23 @@
   (is "0. a form that ignores tags is unchanged"
       true (str/includes? text "return a + 5;")))
 
+
+;; 5. C1b. `(report ^I32 (to-f a))` must reach `report` as I32, not the F64
+;; that `to-f` declares -- a form cannot always know what it produced and the
+;; caller often can. And `^Undeclared` is CARRIED as a bare symbol, because
+;; kin does not ask whether a tag is declared or what it means.
+(let [{:keys [seen]}
+      (render ns-form
+              '[(defn ^:method ^I32 k [^Rt rt ^I32 a]
+                  (report (to-f a) ^I32 (to-f a) ^Undeclared (to-f a) ^F64 a))])]
+  (is "5. without an annotation, the form's own tag stands" '["to_f(a)" F64] (nth seen 0))
+  (is "5. a call-site ^I32 overrides the form's F64" '["to_f(a)" I32] (nth seen 1))
+  (is "5. an UNDECLARED call-site tag is carried, not refused"
+      '["to_f(a)" Undeclared] (nth seen 2))
+  (is "5. and it overrides a local's declared tag too" '["a" F64] (nth seen 3)))
+
 (println)
 (if (zero? @failures)
-  (println "tags: all four obligations hold, and ignoring a tag still works\n")
+  (println "tags: all five obligations hold, and ignoring a tag still works\n")
   (do (println (format "tags: %d FAILURE(S)\n" @failures))
       (System/exit 1)))

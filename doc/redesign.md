@@ -66,6 +66,14 @@ Two consequences worth designing for rather than discovering:
 * the annotation is on the ARGUMENT, so it must be read where the argument is
   rendered, not where the form is looked up.
 
+> **DONE.** `kin-render-tagged` reads `^Tag` from the argument's metadata and
+> prefers it to whatever the inner form declared. An annotation that resolves
+> through the require scope arrives as that tag's value; one that resolves to
+> nothing arrives as the bare symbol, because kin does not ask whether a tag
+> is declared. Pinned by `test/tags.clj` case 5, including the undeclared
+> case. The EDN reader preserves metadata on both lists and symbols, so
+> nothing had to change about reading.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:
