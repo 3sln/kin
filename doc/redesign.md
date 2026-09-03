@@ -210,6 +210,35 @@ handle INTRA-namespace forward references -- fine-grained, order-free. Not
 competing: the DAG means every import is settled before a namespace starts, so
 the only unsettled nodes at join are local ones.
 
+> **DONE, and flint is byte-identical at every step.**
+>
+> A node is `{:kin/node {...}}` in one of two kinds. An ANCHOR is the
+> degenerate promise -- no dependencies, only its content late -- so kin
+> carries one deferral mechanism rather than two.
+>
+> `render` STILL RETURNS A STRING, and that is the decision that kept the
+> blast radius inside kin. A true fragment type would have broken every
+> `(str (render a) ...)` in kin.lang, in flint's vocabularies and in the
+> user's. Instead a deferred node answers a NUL-delimited TOKEN and registers
+> a promise; the token flows through `str` like any other text and is
+> substituted for the settled text at join. An anchor is a hole in the SINK; a
+> token is a hole in the TEXT.
+>
+> `kin/with ctx {:forms [...] :tags [...]} f` runs `f` IMMEDIATELY when
+> everything is available, which is every call in a project with no forward
+> references -- so such a project makes no promises at all and cannot change.
+> `test/promises.clj` case 6 asserts exactly that.
+>
+> The unsettled scan carries provenance -- source label, source form, and the
+> dependency set -- and distinguishes the two failures by data: nothing
+> defines it, versus these wait on each other.
+>
+> KNOWN AND DOCUMENTED: `strip-parens` and `delimited?` inspect rendered text,
+> and a deferred sub-expression is a token at that moment. So parenthesisation
+> around a deferred node is decided on the token -- `return (a + b);` where an
+> eager render gives `return a + b;`. Cosmetic, reachable only through a
+> forward reference, and stated rather than hidden.
+
 ## SUPERSEDED: what does `declare-form!` carry?
 
 Described as "an indirecting placeholder that gets filled later". **kin cannot

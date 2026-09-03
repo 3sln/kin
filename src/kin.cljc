@@ -41,27 +41,46 @@
 
 ;; --------------------------------------------------------------- the context
 
-(defn- new-sink [] (atom []))
-
-;; --------------------------------------------------------------- anchors
+;; ------------------------------------------------------------------ nodes
 ;;
-;; An ANCHOR is a named place in the output that has already gone past.
+;; A NODE is a piece of output that is not text yet.
+;;
+;; There are two kinds and they are the same thing at different strengths:
+;;
+;;   an ANCHOR   a place in the output that has already gone past. Emitted
+;;               into later, resolved when the buffer is joined. No
+;;               dependencies -- it is settled the moment it exists, and only
+;;               its CONTENT arrives late.
+;;   a PROMISE   a computation that cannot run yet because something it needs
+;;               is not defined. Carries a DEPENDENCY SET, is retried at join
+;;               until it settles, and is an ERROR if it never does.
+;;
+;; An anchor is the degenerate promise: no dependencies, nothing to wait for.
+;; They are one mechanism rather than two because kin carrying two deferral
+;; systems is how the second one drifts from the first.
 ;;
 ;; `before!` came first and could only reach ONE level up -- before the
-;; statement being built. That is enough for hoisting a temporary and enough for
-;; nothing else: a loop-invariant binding wants to go before the LOOP, a scratch
-;; declaration wants the top of the FUNCTION, and neither is one level up.
-;;
-;; An anchor is dropped where the output should later appear, carried in a scope
-;; frame, and emitted against from arbitrarily deep. Resolution happens when the
-;; buffer is joined, so an anchor placed early can be written to late.
+;; statement being built. That is enough for hoisting a temporary and enough
+;; for nothing else: a loop-invariant binding wants to go before the LOOP, a
+;; scratch declaration wants the top of the FUNCTION, and neither is one level
+;; up.
+
+(defn- new-sink [] (atom []))
+
+(defn node?
+  "Is `x` a deferred node -- an anchor or a promise?"
+  [x]
+  (and (map? x) (contains? x :kin/node)))
 
 (defn anchor
-  "A fresh anchor -- a place to emit into, resolved when the output is joined."
-  []
-  {:kin/anchor (new-sink)})
+  "A fresh anchor -- a place to emit into, resolved when the output is joined.
 
-(defn anchor? [x] (and (map? x) (contains? x :kin/anchor)))
+  A promise with no dependencies: it is settled already and only its content
+  is late."
+  []
+  {:kin/node {:kind :anchor :sink (new-sink)}})
+
+(defn anchor? [x] (and (node? x) (= :anchor (:kind (:kin/node x)))))
 
 (defn emit-anchor!
   "Drop an anchor HERE and return it. Whatever is emitted against it later
@@ -71,13 +90,109 @@
     (swap! (:out ctx) conj a)
     a))
 
+(defn promise-node
+  "A node that cannot produce its text yet.
+
+  `deps` is DATA -- `{:forms [...] :tags [...]}` -- and that is the whole
+  reason a good error is possible: an unsettled node can say what it was
+  waiting for. `thunk` is `(fn [] text)`, retried at join until `ready?`
+  answers true.
+
+  `origin` is provenance and is not optional in practice. Eager emission
+  fails where the form is; a promise fails at JOIN, far from the cause, so
+  without the source form and label in hand the error degrades to `something
+  did not settle`, which is precisely the useless kind this project keeps
+  removing."
+  [{:keys [deps ready? thunk origin]}]
+  {:kin/node {:kind :promise
+              :deps deps
+              :ready? ready?
+              :thunk thunk
+              :origin origin
+              :settled (atom nil)}})
+
+(defn promise-node? [x] (and (node? x) (= :promise (:kind (:kin/node x)))))
+
+(defn- settle!
+  "Try to settle one promise. True if it is settled now."
+  [n]
+  (let [{:keys [ready? thunk settled]} (:kin/node n)]
+    (cond
+      (some? @settled) true
+      (ready?) (do (reset! settled (thunk)) true)
+      :else false)))
+
+;; A TOKEN is where a deferred node's text will go.
+;;
+;; `render` returns a String and every form composes with `str`, kin's
+;; vocabularies and the user's alike. A deferred sub-expression therefore
+;; cannot return a fragment object without breaking every one of those call
+;; sites -- so it returns a token, and the token is substituted for the
+;; settled text when the buffer is joined. That is the same trick an anchor
+;; plays, one level down: an anchor is a hole in the SINK, a token is a hole
+;; in the TEXT.
+;;
+;; The character is NUL-delimited because it must not occur in any source or
+;; any generated language, and a token that could be typed would be a token
+;; that could be forged.
+
+(defn- token [i] (str "\u0000kin" i "\u0000"))
+
+(def ^:private token-pattern #"\u0000kin(\d+)\u0000")
+
+(defn settle-all!
+  "Settle every promise in `registry`, to a FIXPOINT.
+
+  Repeated because settling one promise can define what another was waiting
+  for. It stops when a pass settles nothing, which is either `everything is
+  done` or `what is left can never be done` -- and those are the same
+  observable state, told apart by the dependency sets rather than by the
+  loop."
+  [registry]
+  (loop []
+    (let [pending (remove #(some? @(:settled (:kin/node %))) registry)
+          progress (reduce (fn [p n] (if (settle! n) true p)) false pending)]
+      (when progress (recur))))
+  registry)
+
+(defn unsettled
+  "Every promise that never settled, with its provenance and what it wanted.
+
+  ONE SCAN, TWO FAILURES. A reference to something never defined and a true
+  cycle where two nodes wait on each other are the same observable thing --
+  unsettled at join. The dependency sets say which: a node nothing else is
+  waiting on was never defined, and nodes waiting on each other are a cycle."
+  [registry]
+  (vec (for [n registry :when (nil? @(:settled (:kin/node n)))]
+         (select-keys (:kin/node n) [:deps :origin]))))
+
+(defn- substitute
+  "Replace every token in `text` with what its promise settled to.
+
+  Repeated, because a settled promise's own text may contain tokens -- a
+  deferred call inside a deferred call. Bounded by the number of promises,
+  so a run that cannot terminate is a bug rather than a hang."
+  [text registry]
+  (loop [text text n 0]
+    (if (or (> n (inc (count registry))) (not (re-find token-pattern text)))
+      text
+      (recur (str/replace text token-pattern
+                          (fn [[_ i]]
+                            (or @(:settled (:kin/node (nth registry (parse-long i))))
+                                "")))
+             (inc n)))))
+
 (defn resolve-sink
-  "A sink's items as one string, anchors resolved in place and recursively --
-  an anchor may itself contain anchors, which is what makes them nest."
+  "A sink's items as one string, ANCHORS resolved in place and recursively --
+  an anchor may itself contain anchors, which is what makes them nest.
+
+  Promises are not here: a promise leaves a TOKEN in the text and settles
+  into the registry, because it may sit inside an expression that has already
+  been flattened to a String by the time this runs."
   [items]
   (str/join (mapv (fn [i]
-                    (if (anchor? i)
-                      (resolve-sink (deref (:kin/anchor i)))
+                    (if (node? i)
+                      (resolve-sink (deref (:sink (:kin/node i))))
                       i))
                   items)))
 
@@ -90,6 +205,11 @@
    ;; Statements to place BEFORE the one being built. A form that needs a
    ;; temporary writes here and the statement layer flushes it.
    :pre (new-sink)
+   ;; Every promise made while this context is alive. One registry per
+   ;; emission, because a promise may be created deep inside an expression
+   ;; whose text has already been joined -- there is no tree left to find it
+   ;; in by then.
+   :promises (atom [])
    :scope {}
    :indent 0})
 
@@ -149,7 +269,7 @@
   should not have to care which it was handed -- it emits at a place, and a
   place is either \"here\" or an anchor."
   [target & parts]
-  (swap! (if (anchor? target) (:kin/anchor target) (:out target))
+  (swap! (if (node? target) (:sink (:kin/node target)) (:out target))
          conj (apply str parts))
   nil)
 
@@ -465,19 +585,29 @@
       (apply v args)
       (throw (ex-info
               (str "kin: `" sym "` was declared and used before it was"
-                   " defined. `declare-" (name kind) "!` reserves the name so"
-                   " a forward reference can resolve; the definition still has"
-                   " to arrive before anything asks it to do work.")
-              {:symbol sym :kind kind})))))
+                   " defined, in a position that cannot defer.")
+              {:symbol sym :kind kind :kin/unfilled true})))))
 
 (defn declare!
   "Reserve `sym` as a forward reference, to be filled by a later `define-`.
 
+  A BARE declare is the case that settles kin's emission model. Given
+
+      (declare foo)
+      (defn zip ... (foo x) ...)
+      (defn foo ...)
+
+  there is no signature to emit a call from, so `zip` genuinely cannot
+  produce text until `foo` is defined. A placeholder that emitted something
+  provisional would be guessing; one that threw would refuse a legal program.
+  So the reference DEFERS: `with` turns it into a promise waiting on `foo`,
+  and the promise settles the moment the definition lands.
+
   Two mutually recursive functions in ONE namespace need this, the same way
-  Clojure does: `declare` the second, define the first, then define the
-  second. ACROSS namespaces it is not needed and not available -- namespace
-  dependencies form a DAG, so everything a namespace requires is already
-  emitted in full by the time it starts."
+  Clojure does. ACROSS namespaces it is neither needed nor available --
+  namespace dependencies form a DAG, so everything a namespace requires is
+  already emitted in full by the time it starts, and the only unsettled nodes
+  at join are local ones."
   [ctx kind opts sym]
   (let [filled (atom nil)]
     (define! ctx kind opts sym (with-meta (placeholder kind sym filled)
@@ -665,6 +795,61 @@
           (when-let [f (get-in ctx [:vocabs vname :literal-tag])] (f v)))
         (:vocab-order ctx)))
 
+(defn available?
+  "Are all the forms and tags in `deps` resolvable right now?
+
+  `{:forms [...] :tags [...]}` -- the same data a promise carries, asked of
+  the context. A form is available when it resolves AND is not still an
+  unfilled `declare-` placeholder; a name that resolves to a stand-in is a
+  name whose content is not there yet, which is the whole distinction."
+  [ctx deps]
+  (and (every? (fn [sym]
+                 (let [f (form-fn ctx sym)
+                       pending (:kin/pending (meta f))]
+                   ;; Resolvable AND actually defined. A `declare-`d name
+                   ;; resolves from the moment it is declared -- that is the
+                   ;; point -- so `resolves` is not the question; `has its
+                   ;; content yet` is.
+                   (and f (or (nil? pending) (some? @pending)))))
+               (:forms deps))
+       (every? (fn [sym] (some? (tag ctx sym))) (:tags deps))))
+
+(defn with
+  "Run `f` when everything in `deps` is available, deferring if it is not.
+
+      (kin/with ctx {:forms ['foo] :tags ['Node]}
+        (fn [{:keys [forms tags]}] ...))
+
+  `f` receives the resolved values, keyed the way the request was, and
+  returns TEXT.
+
+  IT RUNS IMMEDIATELY WHEN IT CAN, which is the overwhelmingly common case
+  and is byte-for-byte the path kin took before promises existed. Only a
+  genuine forward reference defers, so a project with none pays nothing and
+  cannot change -- which is what makes this safe to put underneath an
+  existing tree.
+
+  When it defers it answers a TOKEN and registers a promise. The token flows
+  through `str` like any other text, and is replaced by the settled text when
+  the buffer is joined."
+  [ctx deps f]
+  (let [resolve-deps (fn []
+                       {:forms (into {} (map (fn [s] [s (form-fn ctx s)])) (:forms deps))
+                        :tags (into {} (map (fn [s] [s (tag ctx s)])) (:tags deps))})]
+    (if (available? ctx deps)
+      (f (resolve-deps))
+      (let [reg (:promises ctx)
+            n (promise-node
+               {:deps deps
+                :ready? (fn [] (available? ctx deps))
+                :thunk (fn [] (f (resolve-deps)))
+                :origin {:label (:kin/label ctx)
+                         :form (:kin/form ctx)
+                         :provides (:kin/provides ctx)}})
+            i (count @reg)]
+        (swap! reg conj n)
+        (token i)))))
+
 (defn render-tagged
   "Render `form` and answer BOTH halves of its product: `{:text ... :tag ...}`.
 
@@ -768,7 +953,18 @@
   (cond
     (and (seq? form) (symbol? (first form)))
     (if-let [f (form-fn ctx (first form))]
-      (f ctx form)
+      ;; A DECLARED-BUT-NOT-YET-DEFINED head DEFERS. This is the bare
+      ;; `(declare foo)` case: there is no signature to emit a call from, so
+      ;; the reference becomes a promise waiting on `foo` and settles the
+      ;; moment the definition lands. Anything already defined runs now, which
+      ;; is every call in a project that uses no forward references.
+      (if (and (:kin/pending (meta f)) (nil? @(:kin/pending (meta f))))
+        (emit! ctx (with (assoc ctx :kin/form form) {:forms [(first form)]}
+                    (fn [_]
+                      (let [sub (assoc ctx :out (new-sink))]
+                        ((form-fn ctx (first form)) sub form)
+                        (resolve-sink (deref (:out sub)))))))
+        (f ctx form))
       (throw (ex-info (str "kin: " (first form) " is not in scope"
                            (when (:scope-syms ctx)
                              (str " -- this file requires "
@@ -834,10 +1030,56 @@
 
 ;; ------------------------------------------------------------- declarations
 
+(defn- describe-deps [deps]
+  (str/join ", " (for [[kind syms] deps :when (seq syms)]
+                   (str (name kind) " " (str/join " " (map str syms))))))
+
 (defn output
-  "Everything emitted into `ctx`, with anchors resolved. What a driver writes."
+  "Everything emitted into `ctx`: promises settled, tokens substituted, and an
+  ERROR if anything is still waiting. What a driver writes.
+
+  THIS IS WHERE DEFERRAL IS PAID FOR. Emission is dependency-ordered rather
+  than time-ordered, so a forward reference is legal while the buffer is
+  being built and illegal once it is joined -- by then every promise has had
+  every chance it will get.
+
+  The message carries provenance because it has to. A promise fails at join,
+  far from the form that made it, so an error naming only the failure sends
+  the reader to find the cause by hand -- which is the useless kind of error
+  this project keeps removing."
   [ctx]
-  (resolve-sink (deref (:out ctx))))
+  (let [registry @(:promises ctx)
+        _ (settle-all! registry)
+        stuck (unsettled registry)]
+    (when (seq stuck)
+      (let [wanted (into #{} (mapcat (fn [u] (mapcat val (:deps u)))) stuck)
+            ;; A node NOTHING ELSE DEFINES was never defined; nodes waiting
+            ;; on each other are a cycle. The same observable state, told
+            ;; apart by the dependency data rather than by how it was reached.
+            provided (into #{} (mapcat (fn [u] (:provides (:origin u)))) stuck)
+            cyclic (clojure.set/intersection wanted provided)]
+        (throw (ex-info
+                (str "kin: " (count stuck)
+                     (if (= 1 (count stuck)) " reference never settled"
+                         " references never settled")
+                     ".\n"
+                     (str/join "\n"
+                               (for [u stuck]
+                                 (str "  "
+                                      (when-let [l (:label (:origin u))] (str l ": "))
+                                      (pr-str (:form (:origin u)))
+                                      "\n      waiting on "
+                                      (str/join ", "
+                                                (for [[kind syms] (:deps u) :when (seq syms)]
+                                                  (str (name kind) " "
+                                                       (str/join " " (map str syms))))))))
+                     (if (seq cyclic)
+                       (str "\n  These wait on each other: "
+                            (str/join " " (map str (sort-by str cyclic)))
+                            " -- a cycle, not a missing definition.")
+                       "\n  Nothing defines what they wait on."))
+                {:unsettled stuck :waiting-on wanted :cyclic cyclic}))))
+    (substitute (resolve-sink (deref (:out ctx))) registry)))
 
 (defn check-vocabulary
   "Answer `v` if it is a well-formed vocabulary; throw saying why if it is not.
