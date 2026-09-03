@@ -9,7 +9,8 @@
 ;;
 ;; A project says what its vocabularies are in `kin.edn`; this knows nothing
 ;; about any particular runtime.
-(require '[kin] '[clojure.string :as str] '[clojure.edn :as edn] '[kin.target :as target])
+(require '[kin] '[clojure.string :as str] '[clojure.edn :as edn]
+         '[babashka.fs :as fs] '[kin.target :as target])
 
 ;; A project's `kin.edn` names its vocabularies and, optionally, its TARGETS.
 ;; `:targets` may be a vector of keys naming kin's defaults, or a map of full
@@ -110,11 +111,243 @@
         (doseq [f forms] (kin/kin-statement! ctx f))
         [target (kin/kin-output ctx)]))))
 
+
+;; ------------------------------------------------------------------- why
+;;
+;; TWO QUESTIONS THAT WERE ONLY ANSWERABLE BY READING THE GENERATOR.
+;;
+;; `kin why` is the one that would have caught the two worst bugs this tool
+;; has produced. `LS_THUNK` was missing from a name table, so it fell through
+;; to the local namer and emitted an identifier C# does not have; the CLR
+;; failed to compile for the whole of the work that followed and every gate
+;; stayed green. A command that prints where each symbol comes from makes
+;; "it comes from nowhere" a thing you can look at.
+
+(def source-glob (:sources cfg "kin/*.kin"))
+
+(defn sources []
+  (sort (map str (fs/glob "." source-glob))))
+
+(defn- symbols-in
+  "Every symbol in `form`, and every symbol used as a `^Tag`."
+  [form]
+  (let [acc (atom #{})]
+    ((fn walk [f]
+       (when-let [tag (:tag (meta f))] (when (symbol? tag) (swap! acc conj tag)))
+       (cond
+         (symbol? f) (swap! acc conj f)
+         (or (seq? f) (vector? f) (set? f)) (doseq [x f] (walk x))
+         (map? f) (doseq [[k v] f] (walk k) (walk v))
+         :else nil))
+     form)
+    @acc))
+
+(def binding-heads
+  "Forms that BIND a name, by the symbol a vocabulary registers them under.
+
+  Resolved through the source's require scope, so a file that aliased its
+  `let` still has its bindings found. This is a heuristic and `kin why` is
+  diagnostic output rather than a gate -- but the bucket it separates out,
+  `a local you bound` against `a symbol that comes from nowhere`, is exactly
+  the distinction the LS_THUNK bug hid in."
+  '#{defn let for local defstruct defconst})
+
+(defn- bound-names
+  "Names the source BINDS: parameters, let bindings, loop variables."
+  [forms scope]
+  (let [acc (atom #{})
+        head-of (fn [f] (when (and (seq? f) (symbol? (first f)))
+                          (or (second (get scope (first f))) (first f))))]
+    ((fn walk [f]
+       (when (seq? f)
+         (case (head-of f)
+           defn (do (swap! acc into (filter symbol? (nth f 2 [])))
+                    (swap! acc conj (second f)))
+           let (swap! acc into (take-nth 2 (nth f 1 [])))
+           for (swap! acc conj (first (nth f 1 [])))
+           local (swap! acc conj (second f))
+           defstruct (swap! acc into (filter symbol? (nth f 2 [])))
+           defconst (swap! acc conj (second f))
+           nil)
+         (doseq [x f] (walk x))))
+     (cons 'do forms))
+    @acc))
+
+(defn- kind-of
+  "Is `k` a form, a tag or a name in `vocab`?"
+  [vocab k]
+  (cond (contains? (:forms vocab) k) "form"
+        (contains? (:tags vocab) k) "tag"
+        (contains? (:names vocab) k) "name"
+        :else "?"))
+
+(defn- row [label xs]
+  (when (seq xs)
+    (println (format "    %-26s %s" label (str/join " " (sort (map str xs)))))))
+
+(defn why [path]
+  (let [{:keys [ns forms scope report emit-for]} (read-source path)]
+    (println)
+    (println (str "kin why " path))
+    (println)
+    (println "  targets")
+    (doseq [[v ts] (:spoken report)]
+      (println (format "    %-26s speaks %s" (str v)
+                       (str/join " " (sort (map name ts))))))
+    (when (:only report)
+      (println (format "    %-26s %s" ":kin/only"
+                       (str/join " " (sort (map name (:only report)))))))
+    (when (:exclude report)
+      (println (format "    %-26s %s" ":kin/exclude"
+                       (str/join " " (sort (map name (:exclude report)))))))
+    (println (format "    %-26s %s" "this project configures"
+                     (str/join " " (map name target-order))))
+    (println (format "    %-26s %s" "GENERATES FOR"
+                     (str/join " " (map name emit-for))))
+    (doseq [[t reasons] (:ruled-out report)]
+      (println (format "    %-26s %s" (str "not " (name t))
+                       (str/join "; " reasons))))
+    (let [want (set (:targets report))
+          unconfigured (remove (set target-order) (sort-by str want))]
+      (doseq [t unconfigured]
+        (println (format "    %-26s %s" (str "not " (name t))
+                         "this project has no target description for it"))))
+
+    ;; WHERE EVERY SYMBOL COMES FROM. Rendering the source first is what makes
+    ;; `declared here` exact rather than guessed: `defn` registers its own name
+    ;; while it emits, so the file's own declarations are read back from the
+    ;; render rather than inferred from its shape.
+    (let [ctx (assoc (kin/context {} (first emit-for))
+                     :vocabs vocabs :scope-syms scope :targets targets
+                     :locals (atom {}) :names (atom {}) :tmp (atom 0))
+          ;; A RENDER THAT FAILS STILL ANSWERS THE QUESTION. `why` is the
+          ;; command you reach for BECAUSE generation broke, so a throw here
+          ;; is reported and the symbol table printed anyway -- from however
+          ;; far the render got.
+          failure (try (doseq [f forms] (kin/kin-statement! ctx f)) nil
+                       (catch Exception e (ex-message e)))
+          declared (set (keys @(:locals ctx)))
+          named (set (keys @(:names ctx)))
+          bound (bound-names forms scope)
+          used (symbols-in forms)
+          by-vocab (atom {})
+          local (atom #{})]
+      (doseq [sym used]
+        (if-let [[v k] (get scope sym)]
+          (swap! by-vocab update [v (kind-of (get vocabs v) k)] (fnil conj #{}) sym)
+          (swap! local conj sym)))
+      (println)
+      (when failure
+        (println "  THIS SOURCE DOES NOT GENERATE")
+        (println (str "    " failure))
+        (println "    -- the table below is what the render saw before it stopped")
+        (println))
+      (println "  symbols, by where they come from")
+      (doseq [[[v kind] syms] (sort-by (comp str first) @by-vocab)]
+        (row (str v " (" kind ")") syms))
+      (row "declared here" (filter declared @local))
+      (row "named here" (filter named @local))
+      (row "bound here (locals)"
+           (remove (some-fn declared named) (filter bound @local)))
+      (let [nowhere (remove (some-fn declared named bound) @local)]
+        (when (seq nowhere)
+          (row "FROM NOWHERE" nowhere)
+          (println)
+          (println "    A symbol from nowhere is spelled by the target's local")
+          (println "    namer and emitted as written. That is right for nothing")
+          (println "    but a binding this report failed to see -- and it is how")
+          (println "    LS_THUNK reached a C# file whose constant is LsThunk.")))
+
+      ;; SHADOWING, which is the override mechanism and so has to be visible.
+      (println)
+      (println "  shadowed by an earlier require")
+      (let [sh (kin/shadowed scope)]
+        (if (empty? sh)
+          (println "    nothing" (if (< 1 (count (:required report)))
+                                   "-- the vocabularies do not overlap"
+                                   "-- one vocabulary required"))
+          (doseq [[sym others] (sort-by (comp str key) sh)]
+            (println (format "    %-26s means %s, shadowing %s"
+                             (str sym) (str (first (get scope sym)))
+                             (str/join ", " (map (comp str first) others)))))))
+      (println))))
+
+(defn- wrapped
+  "A list of names, indented and wrapped, because sixteen sources one per line
+  is a page and the same sixteen on three lines is a glance."
+  [indent xs]
+  (let [w (count indent)]
+    (loop [line indent xs (sort xs)]
+      (if-let [x (first xs)]
+        (if (and (< w (count line)) (< 76 (+ (count line) 1 (count (str x)))))
+          (do (println line) (recur (str indent x) (rest xs)))
+          (recur (str line (when (< w (count line)) " ") x) (rest xs)))
+        (when (< w (count line)) (println line))))))
+
+(defn- short-name [p] (str/replace (str/replace p #"^.*/" "") #"\.kin$" ""))
+
+(defn targets-report
+  "Every target, and for each: which sources generate for it, and for those
+  that do not, WHICH vocabulary or exclusion ruled it out.
+
+  Reasons are GROUPED. A target no vocabulary speaks is ruled out of every
+  source for the same reason, and sixteen identical lines say it worse than
+  one line naming sixteen sources."
+  []
+  (let [reports (into {} (for [p (sources)]
+                           [p (try {:ok (read-source p)}
+                                   (catch Exception e {:error (ex-message e)}))]))
+        n (count reports)
+        extra (sort-by str (remove (set target-order)
+                                   (mapcat (fn [[_ r]]
+                                             (when-let [s (:ok r)]
+                                               (keys (:ruled-out (:report s)))))
+                                           reports)))
+        every-target (concat target-order (distinct extra))]
+    (println)
+    (doseq [[p r] (sort reports) :when (:error r)]
+      (println (str "  " p " -- DOES NOT READ"))
+      (println (str "    " (:error r)))
+      (println))
+    (doseq [t every-target]
+      (let [gen (mapv key (filter (fn [[_ r]] (and (:ok r) (some #{t} (:emit-for (:ok r)))))
+                                  reports))
+            out (remove (set gen) (map key (filter (comp :ok val) reports)))
+            by-reason (group-by
+                       (fn [p]
+                         (let [rep (:report (:ok (get reports p)))]
+                           (or (str/join "; " (get (:ruled-out rep) t))
+                               (when-not (some #{t} target-order)
+                                 "this project has no target description for it")
+                               "?")))
+                       out)]
+        (println (format "  %s -- %d of %d source%s"
+                         (name t) (count gen) n (if (= 1 n) "" "s")))
+        (wrapped "    " (map short-name gen))
+        (doseq [[reason ps] (sort by-reason)]
+          (println (str "    NOT: " reason))
+          (wrapped "      " (map short-name ps)))
+        (println)))))
+
 (let [[cmd path] *command-line-args*]
   (case cmd
     "gen" (doseq [[t text] (generate path)]
             (println (str "==== " (name t) " ===================================="))
             (print text) (println))
+    ;; A DIAGNOSTIC COMMAND MUST NOT ANSWER WITH A STACK TRACE. `why` is what
+    ;; you run when something is already wrong, so a source that will not even
+    ;; read gets its message and nothing else.
+    "why" (cond
+            (nil? path) (do (println "usage: kin why <source.kin>") (System/exit 2))
+            :else (try (why path)
+                       (catch Exception e
+                         (println)
+                         (println (str "kin why " path " -- THIS SOURCE DOES NOT READ"))
+                         (println (str "  " (ex-message e)))
+                         (println)
+                         (System/exit 1))))
+    "targets" (targets-report)
     (do (println "kin: unknown command" (pr-str cmd))
-        (println "usage: kin gen|verify|emit <source.kin>")
+        (println "usage: kin gen|why <source.kin>")
+        (println "       kin targets")
         (System/exit 2))))
