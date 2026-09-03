@@ -1,3 +1,115 @@
+# DECISIONS: the seven open questions, answered
+
+## 1. Locals win once declared — and `declare` becomes a LINK phase
+
+> Locals should win if they've been declared by the point where they're used.
+> Which means our 'declare' phase becomes more than that, it becomes a 'link'
+> phase, because it's what knows whether something has been declared at a
+> certain point yet. The link phase should be able to hand-off state/data to
+> the generator for the same form, this allows the link phase to tell the
+> generator how to reference a thing, as a local or as a namespace alias, etc.
+
+Bigger than the precedence question it answers. Resolution stops being a
+static scope lookup and becomes POSITIONAL -- "is this declared by HERE?" --
+which only a phase walking in order can know.
+
+So the phase resolves references and RECORDS, per form, how each should be
+emitted: as a local, through a namespace alias, fully qualified. The generator
+then emits what link decided rather than deciding for itself. Two passes of
+the shape every compiler has: resolve, then emit.
+
+**This corrects something I wrote.** I said the declare pass "walks
+CONTAINERS, not bodies" -- a class recurses, a `defn` produces its entry from
+the head and stops. That is wrong under link. A reference lives INSIDE a body,
+so link must walk bodies to resolve it. The link phase is a full walk; only
+the EXPORT half of it can stop at the head.
+
+It also needs a handoff channel: link writes per-form resolution data, the
+generate context reads it. That is a third thing the context protocols must
+carry, beside scope and their own capability.
+
+## 2. `declare` stays mandatory — because not all languages hoist
+
+> Yes keep declare mandatory, because not all languages support hoisting.
+
+A better reason than the one I gave. I argued strictness -- that without
+`declare`, a typo becomes an unsettled promise instead of an error. True, and
+secondary.
+
+The real reason is semantic: if the TARGET language cannot hoist, the
+generated code needs a forward declaration of its own -- a C prototype, a Go
+or Rust ordering constraint. So `(declare foo)` is not only kin bookkeeping;
+in some targets it must EMIT something. That makes it a form with a
+`:generate` half, not merely a `:declare` one.
+
+## 3. How the hand-written side consumes a module
+
+> mod for rust, import static for C# and Java.
+
+Settled. `mod` in Rust, `import static` in Java, `using static` in C#. All
+three leave existing call sites unqualified.
+
+## 4. The three host functions: PORT them
+
+> Port.
+
+`bn-new`, `cn-copy-set-val`, `cn-set`. Takes flint's external surface to zero,
+which is a cleaner proof of the mechanism than three permanent exceptions.
+Prove the manual-namespace mechanism on them first, then port -- the mechanism
+is still needed for genuinely external things.
+
+## 5. Layout: `kingen/*` then the host language's convention
+
+> 'kingen/*' then the host language's convention, for java that means each
+> namespace element gets its own subdir, and the final namespace tail is the
+> class name. Similar for C# I believe; I don't know for rust.
+
+**Rust is the same shape**, which the author did not know and which is worth
+recording: a module `flint::rt::maps` lives at `flint/rt/maps.rs`, with
+`flint/rt.rs` (or `flint/rt/mod.rs`) carrying `pub mod maps;`. Directory
+mirrors namespace exactly as in Java and C#.
+
+    namespace   flint.rt.maps
+
+    kingen/flint/rt/maps.rs       + `pub mod maps;` in flint/rt.rs
+    kingen/flint/rt/Maps.java     class Maps, package flint.rt
+    kingen/flint/rt/Maps.cs       namespace flint.rt, class Maps
+
+The one asymmetry: Rust needs the parent to DECLARE the child, so something
+must maintain `pub mod maps;`. Java and C# need nothing. That is the same
+"who writes the consuming line" question as item 3 and should be answered the
+same way.
+
+## 6. Provenance format: the agent's call
+
+> Find something that works, I'll leave it to the agent.
+
+With the standing requirement from the promise section: it must name which
+node, from which source form, waiting on what. "Something did not settle" is
+the failure this project keeps removing.
+
+## 7. Regions are SCRUBBED, not retired per unit
+
+> Regions should be scrubbed, and all existing instances converted. Trying to
+> do this kind of thing in pieces is a failing game and leads to bad design.
+
+**This overrules my recommendation**, which was to retire regions per unit as
+each became fully owned and keep the splice path meanwhile. The author is
+right about the failure mode: supporting both mechanisms means the design
+bends to accommodate a transitional state that then never ends.
+
+So: every one of the sixteen sources becomes a whole module under `kingen/`,
+the hand-written files gain their `mod`/`import static`/`using static` lines,
+and the splice path is DELETED.
+
+Note what this depends on, because the ordering matters: the scrub needs
+modules working, which needs `:emit`, the link phase and exports. It is the
+LAST step, not a parallel one. And `bin/check-kin` changes meaning with it --
+it stops comparing regions and starts comparing whole files, which is a
+simpler check than the one it replaces.
+
+---
+
 # OPEN QUESTIONS
 
 Five, in the order they should be answered. The first is the sharpest because
