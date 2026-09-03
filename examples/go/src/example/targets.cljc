@@ -3,7 +3,8 @@
 
   Nothing here is registered with kin and nothing in kin knows the word `go`.
   A target is a map; this is one."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [kin.vfs :as vfs]))
 
 (def reserved
   #{"break" "case" "chan" "const" "continue" "default" "defer" "else"
@@ -38,7 +39,10 @@
         ;; An exported Go function is capitalised. That is the whole of Go's
         ;; visibility rule and it lives here, where the language does.
         :fn-name (namer (fn [s] (str/join (map str/capitalize (str/split s #"-")))))
-        :dest "out"
+        ;; WHERE IT WRITES, as a vfs rather than a path. kin performs no I/O
+        ;; of its own; every byte goes through this. Swap it for
+        ;; `(vfs/memory-vfs)` and the same emit runs with no disk at all.
+        :vfs (vfs/disk-vfs "out")
         ;; Namespace -> file. Deterministic, no table: `example.gcd` becomes
         ;; `out/gcd.go`.
         :path (fn [ns-name] (str (last (str/split (str ns-name) #"\.")) ".go"))

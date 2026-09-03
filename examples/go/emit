@@ -1,0 +1,6 @@
+#!/usr/bin/env bb
+;; Write it into out/gcd.go, between the markers.   ./emit kin/gcd.kin
+(require '[kin.project :as kp] '[example.project :as p])
+(let [[path] *command-line-args*]
+  (doseq [r (kp/emit! @p/project (slurp path) path)]
+    (println (format "  %-6s %s" (name (:target r)) (or (:path r) "(nowhere)")))))

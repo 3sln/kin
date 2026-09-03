@@ -1,0 +1,8 @@
+#!/usr/bin/env bb
+;; Print the Go this source generates.   ./gen kin/gcd.kin
+(require '[kin.project :as kp] '[example.project :as p])
+(let [[path] *command-line-args*
+      out (kp/generate @p/project (slurp path) path)]
+  (doseq [[t text] out]
+    (println (str "==== " (name t) " ===================================="))
+    (print text)))

@@ -96,7 +96,7 @@ A vocabulary is one var holding one map:
 **`examples/go`** is this, end to end, and it runs:
 
 ```
-cd examples/go && bb ../../bin/kin gen kin/gcd.kin
+cd examples/go && ./gen kin/gcd.kin
 ```
 
 Three files, none of which kin knows anything about:
@@ -109,29 +109,37 @@ Three files, none of which kin knows anything about:
       :local-name (namer camel)          ; how a local is spelled
       :fn-name (namer pascal)            ; an exported Go function is capitalised
       :indent-unit "\t"                  ; Go indents with tabs
-      :dest "out"                        ; where its files live
+      :vfs (vfs/disk-vfs "out")          ; WHERE, as a protocol impl
       :path (fn [ns] (str (last-segment ns) ".go"))}}
 ```
 
-`:dest` and `:path` are how a target says where a namespace's code goes. It is
+`:vfs` and `:path` are how a target says where a namespace's code goes. It is
 **computed, not listed**: give it a namespace and it answers a file, with no
 table anywhere. `:path` may answer `nil`, which means this namespace is
 generated and written nowhere — a source that exists to be verified rather
 than shipped.
 
+**kin performs no I/O of its own.** Every byte it reads or writes goes through
+the `:vfs` on the target, which the user supplies. `kin.vfs/disk-vfs` is the
+ordinary one; `kin.vfs/memory-vfs` is a map, and it is what lets `emit!` be
+tested end to end with no directory, no cleanup, and no chance that a passing
+test wrote into the tree it was checking (`test/emit.clj`).
+
 **The vocabulary** (`src/example/go.cljc`) — eight forms and two tags, because
 a vocabulary is as big as the sources that use it and no bigger. There is no
 base class to inherit and no set of forms you are obliged to provide.
 
-**`kin.edn`** — two lines:
+**The project** — two lines of ordinary Clojure:
 
 ```clojure
-{:vocabularies [example.go]
- :targets example.targets}
+(def project
+  (delay (kp/load-project {:vocabularies '[example.go]
+                           :targets targets/targets
+                           :target-order [:go]})))
 ```
 
-`:targets` names a *namespace* rather than listing descriptors, because a
-`:path` is a function and a function cannot be written in EDN.
+There is no config file, because a `:path` is a function and a `:vfs` is a
+protocol implementation, and neither can be written in EDN.
 
 The generated Go is what `gofmt` would have written — checked, not asserted:
 `gofmt -l` has nothing to say about it.
@@ -171,7 +179,7 @@ wins:
 ```
 
 That file gets `my-ops`'s arithmetic and `kin.lang`'s `let`, `if` and
-`return`, with no editing of `kin.lang` and no fork of it. `kin why` prints
+`return`, with no editing of `kin.lang` and no fork of it. `why` reports
 every symbol shadowed this way, so an override is visible rather than
 inferred.
 
@@ -213,21 +221,31 @@ committed, and the markers make the next run a diff rather than a merge.
 The cost of that choice is that the two can drift: a hand edit inside a region
 survives until someone re-emits, and a vocabulary change silently makes every
 committed region stale. **A project committing generated code needs a gate
-that re-emits everything and compares.** `kin destinations` prints every file
-kin would write, for exactly that purpose.
+that re-emits everything and compares.** `kin.project/destinations` answers
+every `[target path]` the project would write, for exactly that purpose.
 
-## 7. When something is wrong
+## 7. kin is a library, not a command
 
-```
-kin gen     <source.kin>   print what each target would get
-kin emit    <source.kin>   write it into the target files, between markers
-kin emit                   every source
-kin destinations           every file kin would write
-kin why     <source.kin>   where every symbol comes from
-kin targets                every target, and what ruled the rest out
-```
+**There is no `kin` executable.** The script belongs to the project using it,
+because what a project wants from a generator — where its sources live, how
+its output is printed, what its gates are — is the project's business. flint
+has `kin/gen`, `kin/emit`, `kin/destinations`, `kin/kin` and `kin/verify`;
+`examples/go` has `gen` and `emit`; each is a dozen lines over the library.
 
-**`kin why`** is the one to reach for. It prints which targets a source
+The surface is three layers, and they differ in kind:
+
+| | | |
+| --- | --- | --- |
+| `generate` | **pure** | source text in, `{target text}` out. Opens nothing. |
+| `emit!` | needs a **vfs** | reads, splices, writes — all through the user's implementation. |
+| *verify* | needs a **machine** | compiling with `rustc` and running it is process execution. **Not in kin**, and never should have been — it lives in the consumer's tree. |
+
+`why` and `targets-report` return **data**. Printing is the caller's, which is
+what makes them usable from something that is not a terminal.
+
+## 8. When something is wrong
+
+**`why`** is the one to reach for. It prints which targets a source
 generates for and how that was computed, which vocabulary contributed each
 symbol, what an earlier require shadowed, and — the bucket that justifies the
 command — **`FROM NOWHERE`**: a symbol in no vocabulary, declared by nothing
@@ -236,8 +254,8 @@ written.
 
 That is not hypothetical. A constant missing from a name table passed through
 verbatim and emitted an identifier C# does not have; the CLR failed to compile
-for the whole of the work that followed and every gate stayed green. `kin gen`
-emits it happily. `kin why` says:
+for the whole of the work that followed and every gate stayed green.
+`generate` emits it happily. `why` reports:
 
 ```
     FROM NOWHERE               ls-thunk
