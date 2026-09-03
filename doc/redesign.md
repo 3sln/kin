@@ -386,12 +386,32 @@ So the shape is:
 3. after the forms have run, `:emit` reads the atom, dedupes and formats, and
    emits the header against the anchor.
 
-**kin already has every primitive this needs**, which is a good sign the
-design is landing where the machinery already pointed. `kin-emit-anchor!`
-drops an anchor resolved when the buffer is JOINED -- so something emitted
-late appears early -- and `kin-scoped` / `kin-get` carry values a form can
-reach from arbitrarily deep. What is missing is only `:emit` itself and a
-worked example.
+**NOTHING HERE IS A NEW KIN FEATURE.** The author was explicit that this is
+how to use what is already there, and the "atom in the context" is an ordinary
+scope frame:
+
+```clojure
+(kin-scoped ctx {:key    :module          ; or :namespace, :class, :file
+                 :value  {:imports (atom #{}) ...whatever else the target needs}
+                 :indent 1}
+  (fn [inner] ...emit each form into `inner`...))
+```
+
+`kin-scoped` already takes exactly `{:key :value :indent}`, and `kin-get`
+already reads a frame back, so a form does
+`(swap! (:imports (kin-get ctx :module)) conj ...)` and is done.
+`kin-emit-anchor!` already resolves when the buffer is JOINED, so a header
+emitted last appears first. What is missing is only `:emit` itself and a
+worked example -- no new context API, no new primitive.
+
+**And SCOPED rather than global is load-bearing here, not merely tidy.** Under
+C6 a single run generates every source in one process. A global import atom
+would accumulate across files and every generated file would carry every other
+file's imports -- wrong output, and wrong in a way that still compiles in
+Java and C# and would be found late. A scope frame dies with the file it was
+opened for, so files cannot leak into one another. `kin-scoped`'s docstring
+already made the general argument -- "that is a stack, not a variable" -- and
+batch emission is the case where it stops being a matter of taste.
 
 **kin must not know what an import IS.** A form contributes whatever its
 vocabulary and target have agreed on -- `{:type "Addr" :from "crate::mem"}`,
