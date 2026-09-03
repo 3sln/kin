@@ -380,11 +380,16 @@
     (sp/kin-emit! ctx (sp/indent-of ctx) "/// " line "\n")))
 
 (defn- field-form
-  "`(. r i)` -- a field, readable and assignable. One spelling everywhere, which
-  is why it is one form."
+  "`(. r i)` -- a field, readable and assignable.
+
+  The FIELD NAME goes through the target's namer like any other name, so
+  `(. rt champ-added)` is `self.champ_added` in one language and
+  `rt.champAdded` in the next. It used to emit the symbol verbatim, which
+  happened to be right for every field written so far because none of them had
+  a dash in it -- a rule that holds until the first name that tests it."
   [ctx form]
   (let [[_ obj f] form]
-    (sp/kin-emit! ctx (sp/kin-render ctx obj) "." (str f))))
+    (sp/kin-emit! ctx (sp/kin-render ctx obj) "." (sp/local-name ctx f))))
 
 (def base-compound
   "Forms with a compound-assignment spelling, PER TARGET.
