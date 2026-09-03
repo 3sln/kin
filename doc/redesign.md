@@ -299,7 +299,7 @@ cannot affect the RESULT. It can still affect the failure REPORT, and a report
 whose lines reorder between runs is much harder to read than one that does
 not.
 
-## C7 — Should kin splice at all? One namespace, one whole file.
+## C7 — kin produces MODULES; the language consumes them. `:emit` per target.
 
 Verbatim:
 
@@ -307,93 +307,82 @@ Verbatim:
 > existing files now? It seems like it makes more sense to keep kin as
 > 1 namespace -> one file, and have the target code import/require/use it.
 
-**It does splice, today.** Nine regions each in `map.rs`, `Maps.java` and
-`Maps.cs`, and kin owns 57% of `Maps.java` and 43% of `map.rs`. The rest is
-hand-written, and the two are interleaved.
+and, on my having claimed Java could not do this without partial classes:
 
-The instinct is right and the destination is better. Whole files delete the
-markers, the splice, the region parser, the indent arithmetic, and a whole
-class of bug that bit twice in one session -- a carve that swallowed a
-declaration next to the region it was replacing, silently, both times. It
-makes `check-kin` trivially correct (regenerate, compare whole files) and
-makes the batch staging of C6 simpler still.
-
-Three things stand between here and there, and the third is the real one.
-
-### 1. Java has no partial classes, and the other two are fine
-
-The generated code is methods on a type: `impl Rt` in Rust, `static` members
-of `Maps` in Java and C#.
-
-* **Rust** allows several inherent `impl Rt` blocks in one crate, so
-  `champ.rs` can carry its own and `map.rs` keeps its own. Works as is.
-* **C#** has `partial class`, so `Maps.Champ.cs` and `Maps.cs` are the same
-  class in two files. Works as is.
-* **Java has neither.** A class cannot be split across files, so a generated
-  unit must become its OWN class -- `Champ.cnKey(...)` where the hand-written
-  code says `cnKey(...)` today.
-
-That is not fatal and is arguably better: kin already models cross-unit calls
-with `sibling`, and a unit that owns a file IS a sibling. But it changes every
-call site in the hand-written Java, and it means the three targets stop having
-the same shape -- two carry on with one class, Java grows a class per unit.
-(A `class Maps extends MapsGen` would keep the call sites, since Java inherits
-statics. It is available; it is also strange, and worth rejecting explicitly
-rather than not noticing.)
-
-### 2. `:wrap` gets more load-bearing, not less
-
-Today `:wrap` supplies an indent. For a whole file it must supply the file:
-the `package` line and class in Java, the `using`s and namespace in C#, the
-`impl Rt {` in Rust, and every import the generated code needs. The
-`Addr`-not-in-scope failure earlier this session was exactly a missing import
-in a spliced region, and whole-file generation makes that kin's problem to get
-right every time rather than the host file's problem to have got right once.
-
-### 3. REGIONS ARE WHAT MADE THE PORT INCREMENTAL, and that is the cost
-
-This is the sequencing problem and it is not a detail. Whole-file ownership
-means kin owns a unit ENTIRELY -- and today it owns 43% of `map.rs`. The
-remaining 57% is blocked on capabilities kin does not have: closures for
-`map_for_each`, tag dispatch for `map_assoc`/`map_get`/`map_dissoc`, roughly
-375 lines of it.
-
-You cannot generate half a file. So either:
-
-* **finish a unit before switching it.** `Hash`, `Pike` and `Interns` may
-  already be fully owned or close to it -- COUNT before assuming -- and could
-  move to whole-file now, proving the mechanism on a small unit while `Maps`
-  keeps regions;
-* **or keep regions as a transitional mechanism** and retire them per unit as
-  each becomes fully owned, with the last region deleted being the end of the
-  port.
-
-The second is what the tree is already doing without having said so. Saying it
-makes regions a temporary scaffold with a defined end, rather than a
-permanent feature of the design -- which is a different thing to build and a
-different thing to document.
-
-**Recommendation:** adopt whole-file as the target design and the default for
-any unit kin fully owns; keep splicing available for units it does not, and
-name it as scaffolding. Do not delete splicing until the port is finished,
-because deleting it stops the port.
-
-> **NOT IMPLEMENTED, and deliberately.** Two things block it and neither is
-> mine to decide:
+> I really don't understand why you need partial classes for this. Most
+> languages have some concept of a module. We produce modules, the language
+> consumes them.
 >
-> * **`:wrap` is still unanswered.** Whole-file generation makes `:wrap`
->   supply the `package` line, the class, the `using`s and every import --
->   which is a much larger job than the indent it supplies today, and the
->   question of whether `:wrap` owns surrounding TEXT at all is the one
->   already open in `doc/decisions.md`. Building whole-file first would be
->   answering it by accident.
-> * **Java needs a class per unit**, which changes every call site in the
->   hand-written Java. That is a decision about the runtime's shape, not
->   about kin.
->
-> The recommendation itself is adopted in the docs: regions are named as
-> SCAFFOLDING with a defined end rather than a permanent feature, which is
-> what the tree was already doing without saying so.
+> For example in Java we produce a class file reflecting the namespace path
+> and name. In rust we create a module file, and C# we create a namespace file
+> + wrapper class (since we need a place to put methods, etc).
+
+**It does splice today**: nine regions each in `map.rs`, `Maps.java` and
+`Maps.cs`, kin owning 57% of the Java and 43% of the Rust.
+
+### The partial-class objection was WRONG, and it was mine
+
+I anchored on flint's current shape -- generated methods living inside the
+existing `Maps` class -- and concluded that splitting them out needed Java to
+split a class across files. That is not the proposal. kin produces a MODULE and
+the hand-written code consumes it: a class file at the package path in Java, a
+module file in Rust, a namespace file plus a wrapper class in C#. Nothing is
+split; something new is created and imported. All three languages get the same
+treatment and the differences are only what the wrapper looks like.
+
+Two of the three obstacles I listed were downstream of that error and are
+withdrawn. The third stands, and is below.
+
+### `:emit`, per target
+
+From the original proposal, and the mechanism that makes the above kin's
+business to allow and nobody's business to hardcode:
+
+```clojure
+:emit (fn [ctx kin-forms] ...)
+```
+
+It is handed the context and ALL the forms, the `ns` form included, and it
+decides everything about the file:
+
+* the prefix and suffix -- `package` and class in Java, namespace and wrapper
+  class in C#, `impl Rt {` or a bare module in Rust;
+* ANCHORS for imports, requires and usings, so a form that needs a type in
+  scope can register it and have it appear at the top. kin already has
+  anchors (`kin-emit-anchor!`); this is what they are for;
+* whatever other context the form emitters need, established before they run;
+* and the sub-emission of each form, INVOKED BY IT -- so it may emit between
+  forms, not only around them.
+
+Named `:emit` rather than `:root`, at the author's word.
+
+This subsumes `:wrap`, whose semantics were never written down, and retires
+`:indent`, which `src/kin/target.cljc` already marks provisional and describes
+as standing in for it. It is the same principle as C1 and C4: kin carries and
+sequences, the user decides. kin should know nothing about what a file looks
+like.
+
+It also closes a real bug class. The `Addr`-not-in-scope failure earlier this
+session was a missing import in a spliced region -- the host file had got its
+imports right once, and the generated code needed one more. With `:emit`
+owning the import anchor, a form that needs a type says so and the import is
+there.
+
+### What still stands: regions are what made the port INCREMENTAL
+
+Whole-file ownership means kin owns a unit ENTIRELY, and today it owns 43% of
+`map.rs`. The rest is blocked on capabilities kin does not have -- closures for
+`map_for_each`, tag dispatch for `map_assoc`/`map_get`/`map_dissoc` -- about
+375 lines of it. You cannot generate half a file.
+
+So regions are SCAFFOLDING with a defined end, not a feature:
+
+* units kin already owns outright move to whole-file now. COUNT before
+  assuming which those are -- `hash`, `pike` and `interns` are the candidates;
+* units it does not keep their regions until the port reaches them, and the
+  last region deleted is the end of the port.
+
+Do not delete splicing before then, because deleting it stops the port.
 
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
