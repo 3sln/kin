@@ -147,46 +147,86 @@
   `flint.impl.vm/let` (fully qualified), and gives NOTHING else -- a form that
   was not referred is not in scope unqualified, exactly as in Clojure.
 
-  This matters for the same reason it matters in Clojure: two vocabularies can
-  both define `let`, and which one a file means has to be a fact about the file
-  rather than about the order somebody merged two maps."
+  **THE FIRST REQUIRE WINS.** Where two vocabularies offer the same symbol,
+  the one required EARLIER is what the file means, and the later one is
+  shadowed. That is the whole override path:
+
+      (:require [com.example.my-ops :refer [+ - *]]
+                [kin.lang       :refer [+ - * let if return]])
+
+  gets `my-ops`'s arithmetic and `kin.lang`'s `let`, `if` and `return`, with
+  no editing of `kin.lang` and no fork of it. A user who wants their own `+`
+  writes one and puts it first.
+
+  This REVERSES what the code did. It reduced with `assoc`, so the LAST
+  require won -- silently, and against this docstring, which already claimed
+  that `which one a file means has to be a fact about the file rather than
+  about the order somebody merged two maps`. It was a fact about the order,
+  and the order was the wrong way round: the later require, which reads as
+  the more general one, quietly beat the earlier and more specific one.
+
+  Shadowing is not an error and not a warning, because it is the mechanism.
+  It is RECORDED -- in this map's metadata, under `:kin/shadowed` -- and
+  `kin why` prints it, so the effect is visible rather than inferred. An
+  override nobody can see is indistinguishable from a bug, which is how the
+  last-wins behaviour survived this long."
   [ns-form vocabs]
   (let [reqs (->> (rest ns-form)
                   (filter (fn [f] (and (seq? f) (= :require (first f)))))
-                  (mapcat rest))]
-    (reduce
-     (fn [scope spec]
-       (let [spec (if (vector? spec) spec [spec])
-             vname (first spec)
-             opts (apply hash-map (rest spec))
-             alias (:as opts)
-             referred (:refer opts)
-             vocab (get vocabs vname)]
-         (when-not vocab
-           (throw (ex-info (str "kin: no vocabulary " vname)
-                           {:required vname :known (vec (keys vocabs))})))
-         ;; FORMS AND TAGS ALIKE. A tag is referred and aliased exactly as a
-         ;; form is -- `^Usize` has to mean whichever vocabulary's `Usize` this
-         ;; file asked for, for the same reason `let` does.
-         (let [names (concat (keys (:forms vocab)) (keys (:tags vocab))
-                             (keys (:names vocab)))]
-           (as-> scope sc
-             ;; Fully qualified always works.
-             (reduce (fn [m k] (assoc m (symbol (str vname) (str k)) [vname k])) sc names)
-             ;; The alias, when one was asked for.
-             (if alias
-               (reduce (fn [m k] (assoc m (symbol (str alias) (str k)) [vname k])) sc names)
-               sc)
-             ;; And only what was REFERRED, unqualified.
-             (reduce (fn [m k]
-                       (when-not (or (contains? (:forms vocab) k)
-                                     (contains? (:tags vocab) k)
-                                     (contains? (:names vocab) k))
-                         (throw (ex-info (str "kin: " vname " has no " k " to refer")
-                                         {:vocabulary vname :symbol k})))
-                       (assoc m k [vname k]))
-                     sc (or referred []))))))
-     {} reqs)))
+                  (mapcat rest))
+        ;; `put` is where first-wins lives. Everything else in this function
+        ;; is unchanged from the last-wins version.
+        put (fn [acc sym entry]
+              (if-let [held (get-in acc [:scope sym])]
+                (if (= held entry)
+                  acc
+                  (update-in acc [:shadowed sym] (fnil conj []) entry))
+                (assoc-in acc [:scope sym] entry)))
+        result
+        (reduce
+         (fn [acc spec]
+           (let [spec (if (vector? spec) spec [spec])
+                 vname (first spec)
+                 opts (apply hash-map (rest spec))
+                 alias (:as opts)
+                 referred (:refer opts)
+                 vocab (get vocabs vname)]
+             (when-not vocab
+               (throw (ex-info (str "kin: no vocabulary " vname)
+                               {:required vname :known (vec (keys vocabs))})))
+             ;; FORMS AND TAGS ALIKE. A tag is referred and aliased exactly as a
+             ;; form is -- `^Usize` has to mean whichever vocabulary's `Usize` this
+             ;; file asked for, for the same reason `let` does.
+             (let [names (concat (keys (:forms vocab)) (keys (:tags vocab))
+                                 (keys (:names vocab)))]
+               (as-> acc a
+                 ;; Fully qualified always works.
+                 (reduce (fn [m k] (put m (symbol (str vname) (str k)) [vname k])) a names)
+                 ;; The alias, when one was asked for.
+                 (if alias
+                   (reduce (fn [m k] (put m (symbol (str alias) (str k)) [vname k])) a names)
+                   a)
+                 ;; And only what was REFERRED, unqualified.
+                 (reduce (fn [m k]
+                           (when-not (or (contains? (:forms vocab) k)
+                                         (contains? (:tags vocab) k)
+                                         (contains? (:names vocab) k))
+                             (throw (ex-info (str "kin: " vname " has no " k " to refer")
+                                             {:vocabulary vname :symbol k})))
+                           (put m k [vname k]))
+                         a (or referred []))))))
+         {:scope {} :shadowed {}} reqs)]
+    (with-meta (:scope result) {:kin/shadowed (:shadowed result)})))
+
+(defn shadowed
+  "What each symbol in a require scope shadows: `{sym [[vocab k] ...]}`.
+
+  Written by `require-scope` and read by `kin why`. Empty for a source that
+  requires one vocabulary, which is every source in the tree this was built
+  against -- so first-wins changed nothing there, and the check that says so
+  is `bin/check-kin` reporting byte-identical output."
+  [scope]
+  (:kin/shadowed (meta scope) {}))
 
 (defn kin-tag
   "The TAG value a symbol names, resolved through the file's require scope.
