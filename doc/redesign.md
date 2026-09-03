@@ -3,7 +3,83 @@
 Five, in the order they should be answered. The first is the sharpest because
 a concrete constraint rules out the obvious reading.
 
-## 1. What does `declare-form!` carry?
+## 1. THE EMIT MODEL IS WRONG: nodes must be promises
+
+Settled by the author, and it supersedes the two options below.
+
+    (declare foo bar baz)
+    (defn zip ... references foo ...)
+    (defn foo ...)
+
+A BARE declare is the crux. My option (A) assumed the declaration carried a
+signature, and with a signature there is something to emit a call from. With
+`(declare foo bar baz)` there is not, so `zip` genuinely cannot produce text
+until `foo` is defined. Promises are not one way to do this; they are the only
+way.
+
+> We need each node to be a promise which emits when all dependencies are
+> available; and we need it to be scannable so we can find the
+> missing/unsettled things at the end when we're ready to emit, because the
+> promises aren't time based they're just dependency/order based; by emission
+> time they should all be either settled or something is referenced that isn't
+> defined.
+
+With a form declaring what it waits on:
+
+```clojure
+(kin/with ctx {:forms [...] :tags [...]}
+  (fn [{:keys [forms tags]}] ...))
+```
+
+### It is a generalisation, not a replacement
+
+`resolve-sink` already walks a tree of sink items and resolves ANCHORS at
+join. An anchor IS a deferred node -- with no dependency set, and only legal
+in statement position. So the change is three widenings of something that
+exists:
+
+1. deferred nodes in EXPRESSION position, not only sink position;
+2. DEPENDENCY SETS on them, so resolution is ordered rather than positional;
+3. the tree SCANNABLE for unsettled nodes at the end.
+
+Anchors should then become the degenerate case -- a promise with no
+dependencies -- rather than kin carrying two deferral systems.
+
+### One scan, two failure modes
+
+A reference to something never defined, and a true cycle where two nodes each
+wait on the other, are the same observable thing: UNSETTLED AT JOIN. One scan
+catches both, and the dependency sets say which is which -- nothing waiting on
+it versus each waiting on the other.
+
+### What changes hardest: `render`
+
+`kin/render` returns a String today, and every form composes with
+`(str (render a) " + " (render b))`. Once a sub-expression may be unsettled,
+`render` cannot promise text. Either it returns a fragment that may be a
+promise and concatenation becomes a deferring join -- blast radius inside kin
+-- or every form that builds strings becomes dependency-aware, which pushes it
+into every vocabulary including the user's. The first.
+
+### The risk: diagnostics
+
+Eager emission fails WHERE THE FORM IS. Promise resolution fails at the end,
+far from the cause. So the scan must carry provenance -- which node, from
+which source form, waiting on what -- or the result is "something did not
+settle", which is the useless kind of error this project keeps removing.
+
+`{:forms [...] :tags [...]}` is right for exactly this reason: the
+dependencies are DATA, so an unsettled node can say what it wanted. `kin why`
+gets better for free.
+
+### The division to keep explicit
+
+Namespaces stay a DAG resolved topologically -- coarse, ordered. Promises
+handle INTRA-namespace forward references -- fine-grained, order-free. Not
+competing: the DAG means every import is settled before a namespace starts, so
+the only unsettled nodes at join are local ones.
+
+## SUPERSEDED: what does `declare-form!` carry?
 
 Described as "an indirecting placeholder that gets filled later". **kin cannot
 do that for call sites.** `kin/render` collapses a form to a STRING
