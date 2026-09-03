@@ -813,11 +813,63 @@ Three ways out:
   b. a map, `{:local f :external g}`;
   c. kin wraps the local one for external use.
 
-(a) is the one that fits everything else here: the emit function already
-receives `ctx`, so it needs only to know the calling namespace, and the target
-keeps deciding both shapes with kin deciding neither. (c) would have kin
-inventing a qualified call, which it has no basis for. Worth settling
-explicitly rather than falling into (b) because it is the obvious one.
+**DECIDED (a), and not the way I first read it.** The author:
+
+> I think the form impl should always ask where it's being used to decide how
+> to generate the reference.
+>
+> I don't mean it should ask which kin namespace it's being used in. Generally
+> our kin emitters will already have a `:class` or some other scope telling us
+> what we're inside of, we just check that, if it's the same thing our thing is
+> defined in, then we self reference; otherwise we use an absolute reference.
+
+The question is not about kin namespaces at all. It is about the EMITTED
+structure -- the `:class` or `:module` frame the target's own `:emit` already
+pushed. A form compares where it is being used against where its definition
+lives, and self-references or absolute-references accordingly. kin supplies
+nothing new for this: the scope stack is already the mechanism, and targets
+already push frames onto it.
+
+So `define-form!` takes ONE function, every form asks, and a private form asks
+too -- it simply always gets the same answer. No branch in kin, no map of two
+shapes, and no case where kin invents a reference it has no basis for.
+
+### `get-all`, and the bug underneath it
+
+> We probably need to give kin a way to 'get-all' to return the full/ordered
+> stack of scope entries with the given key too, for example for referencing
+> things from the parent class or sibling classes from within an inner class.
+
+`kin/get` returns one frame. An inner class referencing something in its
+parent needs the CHAIN -- which class am I in, what encloses that, is the
+target in an ancestor or a sibling -- and one frame cannot answer it.
+
+**And the current implementation cannot answer it either, for a reason worth
+recording.** `scoped` stores with `assoc-in`:
+
+```clojure
+(assoc-in ctx [:scope (:key entry)] (:value entry))
+```
+
+A nested frame with the same key OVERWRITES the outer one. So an inner class
+does not shadow its parent in the stack -- it erases it. Meanwhile the
+function's own docstring says:
+
+> Scoped rather than global because a form's implementation asks what encloses
+> it -- which class, which package, how deep -- and that is a stack, not a
+> variable.
+
+The docstring states the intent and the code implements the variable. It has
+not bitten because nothing has nested two frames of one key yet, and nested
+classes are exactly the case that would.
+
+The fix is small and changes one shape:
+
+    :scope {key -> [outermost ... innermost]}
+    get     -> the innermost frame (peek), unchanged for every caller today
+    get-all -> the whole vector, outermost first
+
+`get` keeps its current meaning, so nothing that exists has to change.
 
 Should there be a distinction? There already is one and it is real: a tag can
 appear where a call cannot -- in a parameter list, a return position, a `case`
