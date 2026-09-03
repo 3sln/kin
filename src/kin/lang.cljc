@@ -79,10 +79,23 @@
 
 (defn call
   "A form that is a call: render the arguments, fill the target's template, and
-  emit as a statement or an expression depending on where it sits."
+  emit as a statement or an expression depending on where it sits.
+
+  A target with no template is REFUSED by name. It used to fill `nil`, which
+  `fmt` turned into an empty string, so a vocabulary that claimed to speak a
+  target and had missed one form emitted a blank where a call should be --
+  the same shape of silence `:targets` exists to remove, one level down.
+  Tags and names are checked when the vocabulary loads; a form is a function
+  and cannot be, so it is checked here, the first time it is asked."
   [tmpls]
   (fn [ctx form]
-    (let [tmpl (get tmpls (t ctx))
+    (let [tmpl (or (get tmpls (t ctx))
+                   (throw (ex-info
+                           (str "kin: `" (first form) "` has no template for "
+                                (t ctx) " -- it speaks "
+                                (pr-str (vec (sort-by str (keys tmpls)))))
+                           {:form (first form) :target (t ctx)
+                            :speaks (vec (keys tmpls))})))
           as (vec (map-indexed
                    (fn [i f]
                      (let [c (sp/kin-render ctx f)]
@@ -661,9 +674,14 @@
     (sp/kin-declare-name!
      ctx nm (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))))
 
-(defn forms-for
+(defn forms
   "The shape forms. `:default-tag` is the tag an untagged name is given, which
-  is a per-subject choice and so is asked for rather than assumed."
+  is a per-subject choice and so is asked for rather than assumed.
+
+  NOT called `forms-for` any more: that name was the CONVENTION kin used to
+  discover a vocabulary by, and a function that merely builds a form table
+  should not look like one. A subject calls this and merges the result into
+  its own `:forms`."
   [{:keys [default-tag compound]}]
   (merge
    {'defn (defn-form default-tag)
@@ -678,3 +696,33 @@
     'continue (fn [ctx _] (sp/kin-emit! ctx (sp/indent-of ctx) "continue;\n"))
     'do (fn [ctx form] (doseq [f (rest form)] (sp/kin-statement! ctx f)))}
    (reduce (fn [m s] (assoc m s (op-form s))) {} (keys ops))))
+
+;; ---------------------------------------------------------- as a vocabulary
+
+(def targets
+  "The targets this vocabulary can speak.
+
+  Three, because the `case` in every form above has three arms. That is a
+  FACT ABOUT THIS FILE rather than about kin: a project that wants a fourth
+  language writes its own shape vocabulary, or shadows the forms it needs
+  (see `require-scope` -- first match wins), and kin needs no change either
+  way. `kin.lang` is one vocabulary that ships in the box, not the language."
+  #{:rust :java :csharp})
+
+(def vocabulary
+  "`kin.lang` as an ordinary vocabulary, requireable from a source:
+
+      (ns runtime.thing
+        (:require [my.subject :refer [Value slot]]
+                  [kin.lang :refer [defn let if return]]))
+
+  It carries NO tags and NO names -- those are the subject's, always -- and
+  no default tag, so every binding in a source that requires this directly
+  has to say what it is. A subject that wants an untagged local to mean
+  something calls `forms` with a `:default-tag` and merges the result
+  instead, which is what every vocabulary in the tree does today."
+  {:namespace 'kin.lang
+   :targets targets
+   :tags {}
+   :names {}
+   :forms (forms {:default-tag nil})})

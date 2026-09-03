@@ -9,7 +9,7 @@
 ;;
 ;; A project says what its vocabularies are in `kin.edn`; this knows nothing
 ;; about any particular runtime.
-(require '[clojure.string :as str] '[clojure.edn :as edn] '[kin.target :as target])
+(require '[kin] '[clojure.string :as str] '[clojure.edn :as edn] '[kin.target :as target])
 
 ;; A project's `kin.edn` names its vocabularies and, optionally, its TARGETS.
 ;; `:targets` may be a vector of keys naming kin's defaults, or a map of full
@@ -25,15 +25,40 @@
       (reduce-kv (fn [m k v] (assoc m k (merge (get target/defaults k) v))) {} t)
       (select-keys target/defaults t))))
 
-(doseq [v (:vocabularies cfg)] (require v))
+;; A VOCABULARY IS ONE VAR, holding one map.
+;;
+;; It used to be three vars found by convention -- `forms-for`, `tags-for`,
+;; `names-for` -- resolved by name and merged. That made the vocabulary
+;; something kin ASSEMBLED rather than something the namespace SAID, so a
+;; namespace could not declare which targets it speaks, could not be checked,
+;; and could not be told apart from a namespace that happened to have a
+;; function called `forms-for` in it.
+(defn load-vocabulary
+  "Require `nsym` and read the vocabulary it declares.
+
+  The var may hold the map or a function returning one; a subject that builds
+  its forms by merging wants the latter, and both are the same value by the
+  time anything asks."
+  [nsym]
+  (require nsym)
+  (let [var (or (resolve (symbol (str nsym) "vocabulary"))
+                (throw (ex-info
+                        (str "kin: " nsym " declares no `vocabulary`. A"
+                             " vocabulary is a var holding a map -- see"
+                             " `kin/vocabulary` -- so that it can say which"
+                             " targets it speaks.")
+                        {:namespace nsym})))
+        v (if (fn? @var) (@var) @var)]
+    (when-not (= nsym (:namespace v))
+      (throw (ex-info (str "kin: " nsym "/vocabulary calls itself "
+                           (pr-str (:namespace v))
+                           " -- a vocabulary's `:namespace` is how a source"
+                           " requires it, so the two have to agree")
+                      {:namespace nsym :declared (:namespace v)})))
+    (kin/check-vocabulary v)))
 
 (def vocabs
-  (into {} (for [v (:vocabularies cfg)]
-             [v (cond-> {:forms ((resolve (symbol (str v) "forms-for")))}
-                  (resolve (symbol (str v) "tags-for"))
-                  (assoc :tags @(resolve (symbol (str v) "tags-for")))
-                  (resolve (symbol (str v) "names-for"))
-                  (assoc :names @(resolve (symbol (str v) "names-for"))))])))
+  (into {} (for [v (:vocabularies cfg)] [v (load-vocabulary v)])))
 
 (defn generate
   "The source, rendered for every target. `[[target text] ...]`."

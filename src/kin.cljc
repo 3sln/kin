@@ -20,10 +20,11 @@
 
   ## The pieces
 
-  * `kin-ns` -- a VOCABULARY: tags, and per-target implementations of forms.
-  * `kin` -- a DRIVER: targets, each with a path and a file preamble.
+  * `vocabulary` -- a VALUE: which TARGETS it can speak, its tags, its names,
+    and per-target implementations of its forms.
   * A source file is an ordinary `ns` with `:require`, so what a file may say is
-    what it asked for. Two sources can use different vocabularies.
+    what it asked for. Two sources can use different vocabularies, and a source
+    generates for the targets every vocabulary it required can speak.
 
   ## Emission
 
@@ -385,19 +386,94 @@
   [ctx]
   (resolve-sink (deref (:out ctx))))
 
-(defn kin-ns
-  "A vocabulary: `:name`, `:tags`, and `:forms` keyed by target.
+(defn check-vocabulary
+  "Answer `v` if it is a well-formed vocabulary; throw saying why if it is not.
 
-  A TAG carries data rather than being a name. `^Stack` can hold the type each
-  target spells it as AND a dispatch table saying what `(push it x)` becomes --
-  which is the compile-time protocol, and the reason tags are values."
-  [& {:keys [name tags forms]}]
-  {:name name :tags (or tags {}) :forms (or forms {})})
+  Called when a vocabulary is LOADED, before any source is read, because the
+  whole point of `:targets` is to move a question that used to be answered
+  deep inside a render -- by a template lookup returning nil -- to a place
+  where it can be answered once and named.
 
-(defn kin
-  "A driver: `:targets` and the `:namespaces` in scope.
+  So the checks here are the ones whose failure used to be silent: a tag with
+  no type for a target the vocabulary claims to speak, and a name with no
+  spelling for one. Both produced an empty string in the output and a build
+  error three files away. Forms cannot be checked this way -- they are
+  functions -- so `kin.lang/call` names the missing target at render time
+  instead."
+  [v]
+  (let [nm (:namespace v)
+        who (str "kin: vocabulary " (or nm "<unnamed>"))]
+    (when-not (map? v)
+      (throw (ex-info (str who " is not a map") {:vocabulary v})))
+    (when-not (symbol? nm)
+      (throw (ex-info (str who " has no `:namespace` -- a vocabulary names"
+                           " itself, so an error about it can say which one")
+                      {:vocabulary v})))
+    (let [targets (:targets v)]
+      (when-not (and (set? targets) (seq targets))
+        (throw (ex-info (str who " declares no `:targets`. A vocabulary has to"
+                             " say which targets it can speak: that is what"
+                             " makes \"can this source be generated for X\" a"
+                             " question with an answer.")
+                        {:vocabulary nm :targets targets})))
+      (doseq [k [:tags :forms :names]]
+        (when-not (map? (get v k {}))
+          (throw (ex-info (str who "'s " k " is not a map") {:vocabulary nm}))))
+      ;; A tag has to have a type in every target the vocabulary speaks.
+      (doseq [[sym tag] (:tags v) t targets]
+        (when-not (get-in tag [:types t])
+          (throw (ex-info (str who " speaks " t " but its tag `" sym "` has no"
+                               " type for it -- add one to `:types`, or drop "
+                               t " from `:targets`.")
+                          {:vocabulary nm :tag sym :target t
+                           :types (:types tag)}))))
+      ;; And a name a spelling.
+      (doseq [[sym spellings] (:names v) t targets]
+        (when-not (get spellings t)
+          (throw (ex-info (str who " speaks " t " but its name `" sym "` has no"
+                               " spelling for it. Passing a name through"
+                               " verbatim is only right when every target"
+                               " agrees, and that is a thing to state rather"
+                               " than to assume.")
+                          {:vocabulary nm :name sym :target t
+                           :spellings spellings})))))
+    v))
 
-  Each target has `:path` (where a namespace's file goes), `:write` (the file's
-  preamble and epilogue) and `:vfs` (where it is written)."
-  [& {:keys [targets namespaces]}]
-  {:targets (or targets {}) :namespaces (or namespaces [])})
+(defn vocabulary
+  "A VOCABULARY, as a value:
+
+      {:namespace 'com.example.my-ns
+       :targets   #{:rust :java :csharp}   ; what this vocabulary can speak
+       :tags      {...}
+       :forms     {...}
+       :names     {...}}
+
+  It used to be a namespace discovered by convention -- `forms-for`,
+  `tags-for` and `names-for` resolved by name, and whatever was found merged.
+  Nothing declared what the vocabulary WAS, and nothing said which targets it
+  could speak. Every template map happened to carry `:rust`, `:java` and
+  `:csharp` because the one subject in the tree happened to want those three.
+
+  `:targets` is the load-bearing addition, and item 3 of the redesign is
+  entirely downstream of it: a source's effective target set is the
+  INTERSECTION of what its required vocabularies can speak, which is a
+  computation that cannot be done at all while a vocabulary is a bag of maps.
+
+  A TAG still carries data rather than being a name. `^Stack` can hold the
+  type each target spells it as AND a dispatch table saying what `(push it x)`
+  becomes -- which is the compile-time protocol, and the reason tags are
+  values.
+
+  Nothing requires this constructor: a literal map with the same keys is a
+  vocabulary. `check-vocabulary` is what a loader calls, and it takes either."
+  [& {:keys [namespace targets tags forms names]}]
+  (check-vocabulary {:namespace namespace
+                     :targets (set targets)
+                     :tags (or tags {})
+                     :forms (or forms {})
+                     :names (or names {})}))
+
+(defn vocabulary-targets
+  "What every one of `vocabs` can speak, as a map of name -> target set."
+  [vocabs]
+  (reduce-kv (fn [m k v] (assoc m k (:targets v))) {} vocabs))
