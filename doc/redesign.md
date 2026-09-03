@@ -235,17 +235,69 @@ that is quietly wrong is worse than no `why` at all, because it ends the
 search. Of everything in this redesign it is the piece that most needs a test
 and, until the source vfs, was the piece that could least easily have one.
 
-### Worth stating about ordering and failure
+### FAILURE: the whole batch reverts, and staging is how
 
-Two things a per-file loop leaves to the caller and a tree-wide function has
-to answer:
+Decided by the author, in two steps -- first that a source whose targets do
+not all succeed must be reverted, then:
 
-* **What happens when one source fails?** Stop, or emit the rest and report?
-  The tree-wide call is the first place this is a real question -- flint's
-  shell loop used `set -e` and stopped, which was never a decision.
-* **Is the order stable?** A glob's order is the filesystem's. Two runs that
-  emit the same sources in a different order are the same result, but a
-  FAILURE report that reorders between runs is much harder to read.
+> Actually, if *any* emission fails maybe we should revert the full batch?
+
+Yes. `emit-all!` is ATOMIC over the whole run: every source, every target, or
+nothing. The reasons the wider granularity is better than per-source:
+
+* a partial tree is a state nobody designed and no gate describes. With eight
+  of sixteen sources emitted, `check-kin` reports the other eight as drifted
+  -- which is true, and says nothing about what happened;
+* recovery becomes trivial and needs no thought: fix, re-run;
+* and the invariant this project exists to hold is that the runtimes AGREE.
+  A half-emitted run is the one state that breaks it on purpose.
+
+**It also makes the implementation simpler, not harder.** Three phases:
+
+1. GENERATE every target of every source, into memory. A form not in scope or
+   an undeclared constant stops the run here, having written nothing.
+2. SPLICE. Read each destination once, apply every region bound for it, keep
+   the result in memory. A missing marker stops the run here, still having
+   written nothing.
+3. WRITE. If a write fails partway, restore the originals.
+
+**The rollback data is free.** Splicing a region requires reading the whole
+destination anyway, so phase 2 has already got every original in hand. Nothing
+is read twice and no snapshot is taken.
+
+**And the protocol does not grow.** Rollback is `-write` with content already
+held; no new operation, no `-delete`, no temp paths. A design change that does
+not need the protocol widened is evidence the three operations were the right
+three.
+
+#### One consequence that is easy to miss
+
+A destination may be written by MORE THAN ONE SOURCE -- flint had nine sources
+emitting into `map.rs` before the consolidation, and nothing forbids it now.
+Under batch atomicity those must be spliced ONCE, accumulating every region
+for a destination before writing it, rather than read-modify-written per
+source.
+
+Doing it per source is wrong in a way that only shows up on failure: emit A
+into `map.rs`, emit B into `map.rs`, then C fails, and rolling back to "the
+original" restores whichever copy the last read saw -- which is the tree with
+A already in it, not the tree the batch started from. Accumulate first, write
+once, and the question does not arise.
+
+#### If the rollback itself fails
+
+Report it loudly, naming exactly which destinations hold new content and which
+hold old. A restore that fails silently leaves a tree that is neither state
+AND no record of which files are which -- strictly worse than the failure it
+was trying to undo, because the next run's `check-kin` will report drift
+without saying that a rollback is the reason.
+
+#### Ordering
+
+Still worth fixing, but for a smaller reason now. All-or-nothing means order
+cannot affect the RESULT. It can still affect the failure REPORT, and a report
+whose lines reorder between runs is much harder to read than one that does
+not.
 
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
