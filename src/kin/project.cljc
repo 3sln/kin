@@ -40,7 +40,7 @@
   `project` builds one from vocabularies you already have. `load-project`
   is the convenience that resolves them from namespace names, and it is the
   only thing here that needs a host with `require` in it."
-  (:require [kin :as sp]
+  (:require [kin]
             [kin.vfs :as vfs]
             [clojure.edn :as edn]
             [clojure.string :as str]))
@@ -54,7 +54,7 @@
   opens a file; a caller that has its vocabularies as values -- a test, a
   browser, a build that already required them -- never touches the loader."
   [{:keys [vocabularies targets target-order sources]}]
-  (let [vocabs (into {} (map (fn [v] [(:namespace (sp/check-vocabulary v)) v]))
+  (let [vocabs (into {} (map (fn [v] [(:namespace (kin/check-vocabulary v)) v]))
                      vocabularies)]
     {:vocabularies vocabs
      :targets (or targets {})
@@ -84,7 +84,7 @@
                               " -- a vocabulary's `:namespace` is how a source"
                               " requires it, so the two have to agree")
                          {:namespace nsym :declared (:namespace v)})))
-       (sp/check-vocabulary v))))
+       (kin/check-vocabulary v))))
 
 #?(:clj
    (defn load-project
@@ -162,7 +162,7 @@
         all (edn/read-string {:readers {}} (str "[" text "]"))
         ns-form (first (filter #(and (seq? %) (= 'ns (first %))) all))
         forms (vec (remove #(and (seq? %) (= 'ns (first %))) all))
-        report (when ns-form (sp/target-report ns-form vocabs))]
+        report (when ns-form (kin/target-report ns-form vocabs))]
     {:label label
      :ns ns-form
      :ns-name (second ns-form)
@@ -171,7 +171,7 @@
      ;; handed this rather than `:forms`, because a function that decides what
      ;; the file looks like needs the declaration that names it.
      :all-forms (vec all)
-     :scope (when ns-form (sp/require-scope ns-form vocabs))
+     :scope (when ns-form (kin/require-scope ns-form vocabs))
      :report report
      ;; What this source generates for HERE: what it asks for, narrowed to
      ;; what the project has a target description for. The two are different
@@ -215,13 +215,13 @@
   forms and drives the emission ITSELF. That is the difference between
   wrapping and owning: it can emit a prefix, drop an anchor for imports, emit
   BETWEEN forms, and close with a suffix, because it is the thing calling
-  `kin-statement!` rather than something kin calls around a loop it owns.
+  `statement!` rather than something kin calls around a loop it owns.
 
   A target without one keeps exactly the loop kin always ran, which is why
   the whole change is additive and why a project generating regions today
   notices nothing."
   [prj analysis target]
-  (let [ctx (assoc (sp/context {} target)
+  (let [ctx (assoc (kin/context {} target)
                    :vocabs (:vocabularies prj)
                    :scope-syms (:scope analysis)
                    ;; The order the source REQUIRED its vocabularies in, so
@@ -233,8 +233,8 @@
                    :local-tags (atom {}) :tmp (atom 0))]
     (if-let [emit (get-in prj [:targets target :emit])]
       (emit ctx (:all-forms analysis))
-      (doseq [f (:forms analysis)] (sp/kin-statement! ctx f)))
-    (sp/kin-output ctx)))
+      (doseq [f (:forms analysis)] (kin/statement! ctx f)))
+    (kin/output ctx)))
 
 (defn generate
   "Source TEXT in, `{target text}` out, for every target it generates for.
@@ -598,13 +598,13 @@
   ([prj label] (why prj (source-text prj label) label))
   ([prj text label]
   (let [{:keys [forms scope report emit-for ns-name]} (analyse prj text label)
-        ctx (assoc (sp/context {} (first emit-for))
+        ctx (assoc (kin/context {} (first emit-for))
                    :vocabs (:vocabularies prj) :scope-syms scope
                    :targets (:targets prj)
                    :vocab-order (:required report)
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))
-        failure (try (doseq [f forms] (sp/kin-statement! ctx f)) nil
+        failure (try (doseq [f forms] (kin/statement! ctx f)) nil
                      (catch #?(:clj Exception :default :default) e
                        #?(:clj (ex-message e) :default (str e))))
         declared (set (keys @(:locals ctx)))
@@ -630,7 +630,7 @@
      :named (into #{} (filter named) local)
      :bound (into #{} (comp (remove declared) (remove named) (filter bound)) local)
      :nowhere (into #{} (comp (remove declared) (remove named) (remove bound)) local)
-     :shadowed (sp/shadowed scope)})))
+     :shadowed (kin/shadowed scope)})))
 
 (defn targets-report
   "Every target, and for each which sources reach it and what ruled out the

@@ -33,7 +33,7 @@
   So a fourth language writes its own shape forms, as this file does. That is
   honest but it is not free, and it is the sharpest remaining edge in kin --
   see the README."
-  (:require [kin :as sp]
+  (:require [kin]
             ;; `kin.lang`'s FORMS speak three languages that are not Go, but
             ;; its helpers are just functions -- `strip-parens` knows how to
             ;; drop an expression's outer parentheses safely and was got right
@@ -47,7 +47,7 @@
 (def Str {:name 'Str :types {:go "string" :java "String"}})
 
 (defn- t [ctx] (:target ctx))
-(defn- ty [ctx tag] (get-in (sp/kin-tag ctx tag) [:types (t ctx)]))
+(defn- ty [ctx tag] (get-in (kin/tag ctx tag) [:types (t ctx)]))
 (defn- fn-name [ctx nm] ((get-in ctx [:targets (t ctx) :fn-name]) ctx nm))
 
 (defn- defn-form
@@ -62,17 +62,17 @@
   [ctx form]
   (let [[_ nm params & body] form
         ret (:tag (meta nm))]
-    (sp/kin-declare!
+    (kin/declare!
      ctx nm
      (fn [c f]
-       (sp/kin-tagged! c (sp/kin-tag c ret))
-       (let [as (mapv (fn [x] (sp/kin-render c x)) (rest f))]
-         (sp/kin-emit! c (fn-name c nm) "(" (str/join ", " as) ")"))))
-    (sp/kin-emit!
-     ctx (sp/indent-of ctx)
+       (kin/tagged! c (kin/tag c ret))
+       (let [as (mapv (fn [x] (kin/render c x)) (rest f))]
+         (kin/emit! c (fn-name c nm) "(" (str/join ", " as) ")"))))
+    (kin/emit!
+     ctx (kin/indent-of ctx)
      (case (t ctx)
        :go (str "func " (fn-name ctx nm) "("
-                (str/join ", " (mapv (fn [p] (str (sp/local-name ctx p) " "
+                (str/join ", " (mapv (fn [p] (str (kin/local-name ctx p) " "
                                                   (ty ctx (:tag (meta p)))))
                                      params))
                 ") " (when ret (str (ty ctx ret) " ")) "{\n")
@@ -84,7 +84,7 @@
        :java (str "public static " (if ret (ty ctx ret) "void") " "
                   (fn-name ctx nm) "("
                   (str/join ", " (mapv (fn [p] (str (ty ctx (:tag (meta p))) " "
-                                                    (sp/local-name ctx p)))
+                                                    (kin/local-name ctx p)))
                                        params))
                   ") {\n")))
     ;; A PARAMETER'S TAG HAS TO BE REGISTERED, or an unannotated `let` in the
@@ -93,20 +93,20 @@
     ;; invisible in Go -- `x := a` needs no type -- and emits ` x = a;` in
     ;; Java. One target hid the bug and the other showed it, which is the
     ;; argument for having two in the example at all.
-    (sp/kin-scoped
+    (kin/scoped
      ctx {:key :fn :value nm :indent 1}
      (fn [inner]
        (doseq [p params]
-         (sp/kin-declare-tag! inner p (sp/kin-tag inner (:tag (meta p)))))
-       (doseq [f body] (sp/kin-statement! inner f))))
-    (sp/kin-emit! ctx (sp/indent-of ctx) "}\n")))
+         (kin/declare-tag! inner p (kin/tag inner (:tag (meta p)))))
+       (doseq [f body] (kin/statement! inner f))))
+    (kin/emit! ctx (kin/indent-of ctx) "}\n")))
 
 (defn- semi [ctx] (if (= :go (t ctx)) "" ";"))
 
 (defn- return-form [ctx form]
-  (sp/kin-emit! ctx (sp/indent-of ctx) "return"
+  (kin/emit! ctx (kin/indent-of ctx) "return"
                 (if (second form)
-                  (str " " (core/strip-parens (sp/kin-render ctx (second form))))
+                  (str " " (core/strip-parens (kin/render ctx (second form))))
                   "")
                 (semi ctx) "\n"))
 
@@ -115,31 +115,31 @@
   is a fact about whether the name is new -- so the source says it: `let`
   declares, `set` assigns."
   [ctx form]
-  (sp/kin-emit! ctx (sp/indent-of ctx) (sp/kin-render ctx (second form))
-                " = " (core/strip-parens (sp/kin-render ctx (nth form 2)))
+  (kin/emit! ctx (kin/indent-of ctx) (kin/render ctx (second form))
+                " = " (core/strip-parens (kin/render ctx (nth form 2)))
                 (semi ctx) "\n"))
 
 (defn- let-form [ctx form]
   (let [[_ bindings & body] form]
     (doseq [[nm init] (partition 2 bindings)]
-      (let [{:keys [text tag]} (sp/kin-render-tagged ctx init)]
+      (let [{:keys [text tag]} (kin/render-tagged ctx init)]
         ;; An unannotated binding takes its initialiser's tag, which in Go is
         ;; also what `:=` does -- so the source needs no annotation and the
         ;; output needs no type.
-        (sp/kin-declare-tag! ctx nm (or (sp/kin-tag ctx (:tag (meta nm))) tag))
+        (kin/declare-tag! ctx nm (or (kin/tag ctx (:tag (meta nm))) tag))
         ;; Go's `:=` declares AND infers; Java needs the type written out, and
         ;; the tag is what supplies it. Same source, and the inference kin
         ;; already does is what makes the Java possible without an annotation.
-        (sp/kin-emit! ctx (sp/indent-of ctx)
+        (kin/emit! ctx (kin/indent-of ctx)
                       (case (t ctx)
-                        :go (str (sp/local-name ctx nm) " := "
+                        :go (str (kin/local-name ctx nm) " := "
                                  (core/strip-parens text))
-                        :java (str (get-in (or (sp/kin-tag ctx (:tag (meta nm))) tag)
+                        :java (str (get-in (or (kin/tag ctx (:tag (meta nm))) tag)
                                            [:types :java])
-                                   " " (sp/local-name ctx nm) " = "
+                                   " " (kin/local-name ctx nm) " = "
                                    (core/strip-parens text)))
                       (semi ctx) "\n")))
-    (doseq [f body] (sp/kin-statement! ctx f))))
+    (doseq [f body] (kin/statement! ctx f))))
 
 (defn- for-form
   "`(while test body...)` -- Go spells every loop `for`."
@@ -147,24 +147,24 @@
   ;; `for (y != 0)` is legal Go and not what anyone writes. The test is a
   ;; whole expression with nothing to bind to, which is the safe case to
   ;; strip.
-  (sp/kin-emit! ctx (sp/indent-of ctx)
-                (let [c (core/strip-parens (sp/kin-render ctx (second form)))]
+  (kin/emit! ctx (kin/indent-of ctx)
+                (let [c (core/strip-parens (kin/render ctx (second form)))]
                   (case (t ctx)
                     ;; Go spells every loop `for`.
                     :go (str "for " c " {\n")
                     :java (str "while (" c ") {\n"))))
-  (sp/kin-scoped ctx {:key :loop :value true :indent 1}
-                 (fn [inner] (doseq [f (drop 2 form)] (sp/kin-statement! inner f))))
-  (sp/kin-emit! ctx (sp/indent-of ctx) "}\n"))
+  (kin/scoped ctx {:key :loop :value true :indent 1}
+                 (fn [inner] (doseq [f (drop 2 form)] (kin/statement! inner f))))
+  (kin/emit! ctx (kin/indent-of ctx) "}\n"))
 
 (defn- op [sym result]
   (fn [ctx form]
-    (let [as (mapv (fn [f] (sp/kin-render ctx f)) (rest form))]
-      (sp/kin-tagged! ctx result)
-      (sp/kin-emit! ctx (str "(" (str/join (str " " sym " ") as) ")")))))
+    (let [as (mapv (fn [f] (kin/render ctx f)) (rest form))]
+      (kin/tagged! ctx result)
+      (kin/emit! ctx (str "(" (str/join (str " " sym " ") as) ")")))))
 
 (defn- comment-form [ctx form]
-  (doseq [line (rest form)] (sp/kin-emit! ctx (sp/indent-of ctx) "// " line "\n")))
+  (doseq [line (rest form)] (kin/emit! ctx (kin/indent-of ctx) "// " line "\n")))
 
 (defn need!
   "Say that this file needs `what` in scope. DATA, not text.
@@ -177,10 +177,10 @@
   `import java.util.Objects;`.
 
   kin's part is only carrying the atom: `:emit` put it in scope with
-  `kin-scoped`, and a form reaches it from arbitrarily deep with `kin-get`.
+  `scoped`, and a form reaches it from arbitrarily deep with `get`.
   kin does not know what an import IS."
   [ctx what]
-  (when-let [needs (sp/kin-get ctx :needs)]
+  (when-let [needs (kin/get ctx :needs)]
     (swap! needs conj what)))
 
 (defn- to-str-form
@@ -192,13 +192,13 @@
   host file had its imports right once, and generated code needing one more
   had nowhere to say so."
   [ctx form]
-  (let [x (core/strip-parens (sp/kin-render ctx (second form)))]
-    (sp/kin-tagged! ctx Str)
+  (let [x (core/strip-parens (kin/render ctx (second form)))]
+    (kin/tagged! ctx Str)
     (case (t ctx)
       :go (do (need! ctx "strconv")
-              (sp/kin-emit! ctx "strconv.Itoa(" x ")"))
+              (kin/emit! ctx "strconv.Itoa(" x ")"))
       :java (do (need! ctx "java.util.Objects")
-                (sp/kin-emit! ctx "Objects.toString(" x ")")))))
+                (kin/emit! ctx "Objects.toString(" x ")")))))
 
 (def vocabulary
   {:namespace 'example.lang

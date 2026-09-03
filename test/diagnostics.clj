@@ -25,7 +25,7 @@
 ;; plus `nowhere.kin`, using a lowercase symbol that comes from nowhere and
 ;; renders SILENTLY, and `broken.kin`, whose constant-shaped one is refused.
 ;; They are the same bug and only one announces itself.
-(require '[kin :as sp] '[kin.lang :as core] '[kin.target]
+(require '[kin] '[kin.lang :as core] '[kin.target]
          '[kin.vfs :as vfs] '[kin.project :as kp] '[clojure.string :as str])
 
 (def I32 {:name 'I32 :types {:rust "i32" :java "int"}})

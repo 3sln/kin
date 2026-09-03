@@ -30,11 +30,12 @@
 
   Two sinks, and the difference is the whole reason hoisting works:
 
-      (kin-emit!  ctx \"...\")   append here
-      (kin-before! ctx \"...\")   append BEFORE the current statement
+      (emit!  ctx \"...\")   append here
+      (before! ctx \"...\")   append BEFORE the current statement
 
-  and `kin-render` runs a form into a string instead of the current sink, so
+  and `render` runs a form into a string instead of the current sink, so
   an expression can be composed while a statement is emitted."
+  (:refer-clojure :exclude [get])
   (:require [clojure.string :as str]
             [clojure.set]))
 
@@ -46,7 +47,7 @@
 ;;
 ;; An ANCHOR is a named place in the output that has already gone past.
 ;;
-;; `kin-before!` came first and could only reach ONE level up -- before the
+;; `before!` came first and could only reach ONE level up -- before the
 ;; statement being built. That is enough for hoisting a temporary and enough for
 ;; nothing else: a loop-invariant binding wants to go before the LOOP, a scratch
 ;; declaration wants the top of the FUNCTION, and neither is one level up.
@@ -62,7 +63,7 @@
 
 (defn anchor? [x] (and (map? x) (contains? x :kin/anchor)))
 
-(defn kin-emit-anchor!
+(defn emit-anchor!
   "Drop an anchor HERE and return it. Whatever is emitted against it later
   appears at this point in the output."
   [ctx]
@@ -92,7 +93,7 @@
    :scope {}
    :indent 0})
 
-(defn kin-scoped
+(defn scoped
   "Call `f` with `ctx` extended by one scoped entry.
 
   `{:key :class :value {...}}`, and `:indent` if the scope indents. Scoped
@@ -103,10 +104,10 @@
          (assoc-in [:scope (:key entry)] (:value entry))
          (update :indent + (or (:indent entry) 0)))))
 
-(defn kin-get
+(defn get
   "Read a scoped entry."
   [ctx k]
-  (get (:scope ctx) k))
+  (clojure.core/get (:scope ctx) k))
 
 (defn indent-of
   "One level of indentation per enclosing scope, spelled the way THIS TARGET
@@ -121,10 +122,10 @@
   (let [unit (get-in ctx [:targets (:target ctx) :indent-unit] "    ")]
     (apply str (repeat (:indent ctx) unit))))
 
-(defn kin-emit!
+(defn emit!
   "Append to the current sink, or to an ANCHOR.
 
-  `(kin-emit! ctx \"...\")` writes here; `(kin-emit! a \"...\")` writes
+  `(emit! ctx \"...\")` writes here; `(emit! a \"...\")` writes
   where `a` was dropped. One function for both because a form implementation
   should not have to care which it was handed -- it emits at a place, and a
   place is either \"here\" or an anchor."
@@ -133,14 +134,14 @@
          conj (apply str parts))
   nil)
 
-(defn kin-before!
+(defn before!
   "Emit before the statement being built -- the anchor the statement layer
   dropped, looked up by name.
 
   Kept as a convenience because hoisting a temporary is the common case, and
   now it is one anchor among others rather than a mechanism of its own."
   [ctx & parts]
-  (apply kin-emit! (or (kin-get ctx :kin/stmt-anchor) ctx) parts))
+  (apply emit! (or (get ctx :kin/stmt-anchor) ctx) parts))
 
 
 ;; ------------------------------------------------------------------ dispatch
@@ -202,7 +203,7 @@
                  opts (apply hash-map (rest spec))
                  alias (:as opts)
                  referred (:refer opts)
-                 vocab (get vocabs vname)]
+                 vocab (clojure.core/get vocabs vname)]
              (when-not vocab
                (throw (ex-info (str "kin: no vocabulary " vname)
                                {:required vname :known (vec (keys vocabs))})))
@@ -288,10 +289,10 @@
   (let [specs (require-specs ns-form)
         required (mapv first specs)
         _ (doseq [v required]
-            (when-not (get vocabs v)
+            (when-not (clojure.core/get vocabs v)
               (throw (ex-info (str "kin: no vocabulary " v)
                               {:required v :known (vec (keys vocabs))}))))
-        spoken (into {} (map (fn [v] [v (:targets (get vocabs v))])) required)
+        spoken (into {} (map (fn [v] [v (:targets (clojure.core/get vocabs v))])) required)
         all (reduce into #{} (vals spoken))
         common (if (seq spoken)
                  (reduce clojure.set/intersection (vals spoken))
@@ -352,7 +353,7 @@
   [scope]
   (:kin/shadowed (meta scope) {}))
 
-(defn kin-tag
+(defn tag
   "The TAG value a symbol names, resolved through the file's require scope.
 
   Tags are namespaced like everything else, so `^Usize` means the `Usize` this
@@ -360,7 +361,7 @@
   [ctx sym]
   (when sym
     (if-let [scope (:scope-syms ctx)]
-      (when-let [[vname k] (get scope sym)]
+      (when-let [[vname k] (clojure.core/get scope sym)]
         (get-in ctx [:vocabs vname :tags k]))
       (get-in ctx [:tags sym]))))
 
@@ -376,10 +377,10 @@
   exactly as it works on a form."
   [ctx sym]
   (when-let [scope (:scope-syms ctx)]
-    (when-let [[vname k] (get scope sym)]
+    (when-let [[vname k] (clojure.core/get scope sym)]
       (get-in ctx [:vocabs vname :names k (:target ctx)]))))
 
-(defn kin-declare-name!
+(defn declare-name!
   "Register how `sym` is SPELLED in each target, for a name whose convention is
   not the local one.
 
@@ -392,7 +393,7 @@
   (when-let [a (:names ctx)] (swap! a assoc sym names))
   nil)
 
-(defn kin-declare!
+(defn declare!
   "Register `sym` as callable by later forms in THIS source file.
 
   A source has to be able to define a helper and then call it. Without this,
@@ -416,11 +417,11 @@
   declared."
   [ctx head]
   (if-let [scope (:scope-syms ctx)]
-    (or (when-let [[vname k] (get scope head)]
+    (or (when-let [[vname k] (clojure.core/get scope head)]
           (get-in ctx [:vocabs vname :forms k]))
-        (get (some-> (:locals ctx) deref) head))
+        (clojure.core/get (some-> (:locals ctx) deref) head))
     (or (get-in ctx [:vocab head])
-        (get (some-> (:locals ctx) deref) head))))
+        (clojure.core/get (some-> (:locals ctx) deref) head))))
 
 
 ;; ------------------------------------------------------------------- tags
@@ -447,7 +448,7 @@
 ;; making a choice about its own forms, and a user who wants a different one
 ;; shadows it (see `require-scope`, first match wins).
 
-(defn kin-tagged!
+(defn tagged!
   "Say that the form now rendering produced `tag`.
 
   Called by a form implementation about ITS OWN product. kin stores it and
@@ -457,12 +458,12 @@
   (when-let [a (:product ctx)] (reset! a tag))
   nil)
 
-(defn kin-local-tag
+(defn local-tag
   "The tag a local was declared or inferred with, or nil."
   [ctx sym]
-  (get (some-> (:local-tags ctx) deref) sym))
+  (clojure.core/get (some-> (:local-tags ctx) deref) sym))
 
-(defn kin-declare-tag!
+(defn declare-tag!
   "Record that `sym` -- a parameter, a binding, a loop variable -- has `tag`."
   [ctx sym tag]
   (when-let [a (:local-tags ctx)] (swap! a assoc sym tag))
@@ -481,11 +482,11 @@
           (when-let [f (get-in ctx [:vocabs vname :literal-tag])] (f v)))
         (:vocab-order ctx)))
 
-(defn kin-render-tagged
+(defn render-tagged
   "Render `form` and answer BOTH halves of its product: `{:text ... :tag ...}`.
 
   This is what item 5 exists for. A form that wants to know what its argument
-  IS -- rather than only what it says -- calls this instead of `kin-render`,
+  IS -- rather than only what it says -- calls this instead of `render`,
   and gets a tag it may use, ignore, or refuse.
 
   A TAG WRITTEN AT THE CALL SITE WINS (correction C1b):
@@ -517,24 +518,24 @@
         written (:tag (meta form))]
     (dispatch sub form)
     {:text (resolve-sink (deref (:out sub)))
-     :tag (if written (or (kin-tag ctx written) written) @product)}))
+     :tag (if written (or (tag ctx written) written) @product)}))
 
-(defn kin-render
+(defn render
   "Run `form` into a STRING rather than into the current sink.
 
   Expressions compose; statements emit. A form implementation that needs a
   sub-expression calls this, and one that emits a statement calls
-  `kin-emit!` -- which is how one vocabulary serves both positions without
+  `emit!` -- which is how one vocabulary serves both positions without
   the translator deciding which is which.
 
-  The text half of `kin-render-tagged`. It is defined in terms of it rather
+  The text half of `render-tagged`. It is defined in terms of it rather
   than beside it so that a form rendering an argument cannot accidentally
   report that argument's tag as its OWN product -- which is what happened
   when the two shared a sub-context."
   [ctx form]
-  (:text (kin-render-tagged ctx form)))
+  (:text (render-tagged ctx form)))
 
-(defn kin-position
+(defn position
   "What this form is being compiled AS: `:statement` or `:expression`.
 
   Pushed DOWN by whatever encloses it, because that is who knows. A top-level
@@ -553,25 +554,25 @@
   what that target wants in that position. One lookup, no wrapper, and nothing
   post-processes a string it did not produce."
   [ctx]
-  (or (kin-get ctx :position) :expression))
+  (or (get ctx :position) :expression))
 
-(defn kin-in
+(defn in
   "Render `form` at `position`, with an anchor for anything it hoists."
   [ctx position form]
   ;; The anchor goes down FIRST, so anything hoisted lands above whatever this
   ;; turns out to be, however deep the form that hoisted it.
-  (let [a (kin-emit-anchor! ctx)
+  (let [a (emit-anchor! ctx)
         sub (-> ctx
                 (assoc :out (new-sink))
                 (assoc-in [:scope :kin/stmt-anchor] a)
                 (assoc-in [:scope :position] position))]
     (dispatch sub form)
-    (kin-emit! ctx (resolve-sink (deref (:out sub))))))
+    (emit! ctx (resolve-sink (deref (:out sub))))))
 
-(defn kin-statement!
+(defn statement!
   "Render `form` as a statement -- the common call, kept short."
   [ctx form]
-  (kin-in ctx :statement form))
+  (in ctx :statement form))
 
 (defn dispatch
   "One form. A seq whose head is in scope goes to its implementation.
@@ -592,12 +593,12 @@
                       {:symbol (first form)})))
     ;; A LOCAL CARRIES THE TAG IT WAS DECLARED WITH, and a literal whatever
     ;; the source's vocabularies say its shape implies. Both are recorded as
-    ;; this form's product, so an enclosing form asking `kin-render-tagged`
+    ;; this form's product, so an enclosing form asking `render-tagged`
     ;; gets an answer for a bare `x` and a bare `5` as well as for a call.
-    :else (do (kin-tagged! ctx (if (symbol? form)
-                                 (kin-local-tag ctx form)
+    :else (do (tagged! ctx (if (symbol? form)
+                                 (local-tag ctx form)
                                  (literal-tag ctx form)))
-              (kin-emit! ctx (literal ctx form)))))
+              (emit! ctx (literal ctx form)))))
 
 (defn local-name
   "A local, spelled the way THIS TARGET spells one.
@@ -645,12 +646,12 @@
                                    " thing to state rather than to assume.")
                               {:symbol v :target (:target ctx)})))
                     (local-name ctx v))
-    (nil? v) (or (kin-get ctx :nil) "null")
+    (nil? v) (or (get ctx :nil) "null")
     :else (str v)))
 
 ;; ------------------------------------------------------------- declarations
 
-(defn kin-output
+(defn output
   "Everything emitted into `ctx`, with anchors resolved. What a driver writes."
   [ctx]
   (resolve-sink (deref (:out ctx))))
@@ -686,7 +687,7 @@
                              " question with an answer.")
                         {:vocabulary nm :targets targets})))
       (doseq [k [:tags :forms :names]]
-        (when-not (map? (get v k {}))
+        (when-not (map? (clojure.core/get v k {}))
           (throw (ex-info (str who "'s " k " is not a map") {:vocabulary nm}))))
       ;; A tag has to have a type in every target the vocabulary speaks.
       (doseq [[sym tag] (:tags v) t targets]
@@ -698,7 +699,7 @@
                            :types (:types tag)}))))
       ;; And a name a spelling.
       (doseq [[sym spellings] (:names v) t targets]
-        (when-not (get spellings t)
+        (when-not (clojure.core/get spellings t)
           (throw (ex-info (str who " speaks " t " but its name `" sym "` has no"
                                " spelling for it. Passing a name through"
                                " verbatim is only right when every target"

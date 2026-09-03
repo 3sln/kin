@@ -18,7 +18,7 @@
 ;;   4. a target whose `:path` answers nil is generated and written NOWHERE
 ;;   5. a destination that does not exist is refused by name
 ;;   6. a file missing either marker is refused by name
-(require '[kin :as sp] '[kin.lang :as core] '[kin.target]
+(require '[kin] '[kin.lang :as core] '[kin.target]
          '[kin.vfs :as vfs] '[kin.project :as kp] '[clojure.string :as str])
 
 (def I32 {:name 'I32 :types {:rust "i32" :java "int"}})
@@ -215,20 +215,20 @@
           ;; the emission itself -- so it can put text before, after AND
           ;; between the forms.
           :emit (fn [ctx forms]
-                  (sp/kin-emit! ctx "// generated\n")
-                  (let [imports (sp/kin-emit-anchor! ctx)]
-                    (sp/kin-emit! ctx "mod thing {\n")
-                    (sp/kin-scoped
+                  (kin/emit! ctx "// generated\n")
+                  (let [imports (kin/emit-anchor! ctx)]
+                    (kin/emit! ctx "mod thing {\n")
+                    (kin/scoped
                      ctx {:key :mod :value true :indent 1}
                      (fn [inner]
                        (doseq [[i f] (map-indexed vector
                                                   (remove #(and (seq? %) (= 'ns (first %)))
                                                           forms))]
-                         (when (pos? i) (sp/kin-emit! inner "\n"))
-                         (sp/kin-statement! inner f))))
-                    (sp/kin-emit! ctx "}\n")
+                         (when (pos? i) (kin/emit! inner "\n"))
+                         (kin/statement! inner f))))
+                    (kin/emit! ctx "}\n")
                     ;; Written LAST, into a place the output went past first.
-                    (sp/kin-emit! imports "use std::fmt;\n")))}))
+                    (kin/emit! imports "use std::fmt;\n")))}))
 
 (is "10. a target with :emit produces whole files" true
     (kp/whole-file? whole-target))
@@ -270,19 +270,19 @@
       (merge kin.target/rust
              {:path (fn [_] "h.rs")
               :emit (fn [ctx forms]
-                      (let [at (sp/kin-emit-anchor! ctx)
+                      (let [at (kin/emit-anchor! ctx)
                             needs (atom #{})]
-                        (sp/kin-scoped
+                        (kin/scoped
                          ctx {:key :needs :value needs}
                          (fn [inner]
                            ;; Contributed in DELIBERATELY reverse order, with
                            ;; a duplicate, which is what a real file does.
                            (doseq [n ["zeta" "alpha" "zeta" "middle"]]
-                             (swap! (sp/kin-get inner :needs) conj n))
+                             (swap! (kin/get inner :needs) conj n))
                            (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
-                             (sp/kin-statement! inner f))))
+                             (kin/statement! inner f))))
                         (reset! collected (vec (sort @needs)))
-                        (sp/kin-emit! at (str/join (map #(str "use " % ";\n")
+                        (kin/emit! at (str/join (map #(str "use " % ";\n")
                                                         (sort @needs))))))})
       fs (vfs/memory-vfs {})
       prj (kp/project {:vocabularies [vocabulary]

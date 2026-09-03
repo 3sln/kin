@@ -22,7 +22,7 @@
 ;; and one negative, which is the point of the whole correction: kin does not
 ;; interpret a tag. A form that ignores tags behaves exactly as it did before
 ;; tags existed.
-(require '[kin :as sp] '[kin.lang :as core] '[kin.target] '[clojure.string :as str])
+(require '[kin] '[kin.lang :as core] '[kin.target] '[clojure.string :as str])
 
 (def I32 {:name 'I32 :types {:rust "i32"}})
 (def F64 {:name 'F64 :types {:rust "f64"}})
@@ -39,12 +39,12 @@
   read. kin carried them here and never looked inside one."
   [ctx form]
   (doseq [a (rest form)]
-    (let [{:keys [text tag]} (sp/kin-render-tagged ctx a)]
+    (let [{:keys [text tag]} (kin/render-tagged ctx a)]
       ;; A tag arrives as a vocabulary's tag VALUE, or -- when the call site
       ;; wrote one that resolves to nothing -- as the bare symbol. kin carries
       ;; whichever it was given.
       (swap! seen conj [text (if (map? tag) (:name tag) tag)])))
-  (sp/kin-emit! ctx (sp/indent-of ctx) "reported;\n"))
+  (kin/emit! ctx (kin/indent-of ctx) "reported;\n"))
 
 (def vocabulary
   {:namespace 'demo
@@ -67,14 +67,14 @@
   [ns-form forms]
   (reset! seen [])
   (let [vocabs {'demo vocabulary}
-        scope (sp/require-scope ns-form vocabs)
-        ctx (assoc (sp/context {} :rust)
+        scope (kin/require-scope ns-form vocabs)
+        ctx (assoc (kin/context {} :rust)
                    :vocabs vocabs :scope-syms scope :vocab-order ['demo]
                    :targets targets
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))]
-    (doseq [f forms] (sp/kin-statement! ctx f))
-    {:text (sp/kin-output ctx) :seen @seen}))
+    (doseq [f forms] (kin/statement! ctx f))
+    {:text (kin/output ctx) :seen @seen}))
 
 (def ns-form
   '(ns probe (:require [demo :refer [defn let return report to-f add

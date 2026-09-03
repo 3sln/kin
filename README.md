@@ -57,6 +57,11 @@ A vocabulary is one var holding one map:
   loads: every tag needs a type for every declared target, and every name a
   spelling.
 
+kin's API is meant to be **aliased, never referred**: call sites read
+`kin/emit!`, `kin/render`, `kin/get`. That is what makes the short names safe
+— a referred `get` would shadow `clojure.core/get`, a qualified `kin/get`
+cannot.
+
 * **A form** is `(fn [ctx form] ...)` that emits text. `kin.lang/call` builds
   the common case from a per-target template:
 
