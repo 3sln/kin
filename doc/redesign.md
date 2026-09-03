@@ -772,10 +772,52 @@ same three:
     kin/declare-name!   a NAME   -- a value spelled per target   NIL, CN_BASE
 
 `require-scope` concats `(:forms v)`, `(:tags v)` and `(:names v)` when it
-builds a scope, so the distinction is load-bearing at both ends already. The
-export API should MIRROR the local one rather than invent a taxonomy:
-`export!`, `export-tag!`, `export-name!`. A `defn` exports a form; a
-`defstruct` exports a tag; a `^:pub defconst` exports a name.
+builds a scope, so the distinction is load-bearing at both ends already.
+
+**The author's API, which is better than the `declare!`/`export!` pair I
+proposed:**
+
+```clojure
+(kin/define-form! ctx {:scope :public}  sym f)
+(kin/define-tag!  ctx {:scope :private} sym t)
+(kin/define-name! ctx {:scope :public}  sym spellings)
+```
+
+One function per KIND, with visibility as an OPTION rather than as a second
+set of functions. Three reasons it is the better shape:
+
+* it is one function per kind instead of kind x visibility, so it does not
+  double if a third scope ever exists;
+* `define` is honester than `declare` for something that supplies an
+  implementation rather than announcing one;
+* and it makes the local/export symmetry structural instead of a convention
+  two APIs happen to share.
+
+It maps straight onto the existing mark: the target's `defn` reads `^:pub` and
+passes `{:scope :public}` or `{:scope :private}`.
+
+**`:public` must mean local AND exported, not exported only.** A `^:pub`
+function is obviously callable from its own file, so registration is
+CUMULATIVE and `:scope` names a maximum visibility rather than a destination.
+Worth stating because the exclusive reading is an easy thing to implement by
+accident, and it fails in the one direction nothing tests: the source itself
+still compiles, and only a same-file caller breaks.
+
+**And it raises the question of what ONE function value means for two call
+shapes.** A local call is `self.merge_two(...)` and an external one is
+`Maps.mergeTwo(...)` plus an import -- but `define-form!` takes one `f`.
+Three ways out:
+
+  a. one function that asks the CONTEXT which namespace is calling, and
+     qualifies or not accordingly;
+  b. a map, `{:local f :external g}`;
+  c. kin wraps the local one for external use.
+
+(a) is the one that fits everything else here: the emit function already
+receives `ctx`, so it needs only to know the calling namespace, and the target
+keeps deciding both shapes with kin deciding neither. (c) would have kin
+inventing a qualified call, which it has no basis for. Worth settling
+explicitly rather than falling into (b) because it is the obvious one.
 
 Should there be a distinction? There already is one and it is real: a tag can
 appear where a call cannot -- in a parameter list, a return position, a `case`
