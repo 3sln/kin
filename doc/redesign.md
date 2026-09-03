@@ -762,6 +762,59 @@ external call (`Maps.mergeTwo(...)` plus the import it registers). Only the
 target can spell either. kin carries the two registries, guarantees exports
 are visible before dependents generate, and shapes neither.
 
+### What goes in: three kinds, and the split already exists
+
+kin already keeps three local registries, and a vocabulary already carries the
+same three:
+
+    kin/declare!        a FORM   -- callable   (merge-two rt ...)
+    kin/declare-tag!    a TAG    -- a type     ^Value, ^RootIx
+    kin/declare-name!   a NAME   -- a value spelled per target   NIL, CN_BASE
+
+`require-scope` concats `(:forms v)`, `(:tags v)` and `(:names v)` when it
+builds a scope, so the distinction is load-bearing at both ends already. The
+export API should MIRROR the local one rather than invent a taxonomy:
+`export!`, `export-tag!`, `export-name!`. A `defn` exports a form; a
+`defstruct` exports a tag; a `^:pub defconst` exports a name.
+
+Should there be a distinction? There already is one and it is real: a tag can
+appear where a call cannot -- in a parameter list, a return position, a `case`
+label -- and the three are resolved in the same scope but used in different
+places.
+
+### CYCLES: form cycles are fine, TAG cycles are not
+
+C8 says a scan pass makes cycles stop mattering. That was too strong, and the
+author is right to push on it: something has to run to produce the exports.
+
+The precise answer follows from the head-only rule below. To build A's export
+vocabulary you need A's `defn` and `def` HEADS. To resolve a head you need A's
+require scope -- because a head says `^Value`, and tags come from requires.
+
+* If A's heads use only tags from BASE vocabularies -- `^Value`, `^I32`, the
+  ordinary case -- then A's exports compute without B having been touched.
+  **A and B may call each other's functions freely.** `node_assoc` and
+  `coll_assoc` in flint do exactly this today, in one file.
+* If A's head says `^StructFromB` and B's head says `^StructFromA`, that is a
+  genuine cycle with no starting point, and no amount of pass ordering fixes
+  it.
+
+So the rule is: **mutual FUNCTION recursion across namespaces is supported;
+mutual TYPE dependency is not.** That is the same rule a language without
+forward declarations has, and it is worth stating in those terms because it
+will be familiar rather than surprising.
+
+The handling should be: do not refuse form cycles, they are ordinary. DETECT
+tag cycles and refuse with both namespaces and the offending tag named. An
+error that says "cyclic dependency" without saying which tag made it cyclic
+sends the reader to bisect their requires by hand.
+
+**And this is what the head-only rule actually buys.** C10 below frames it as
+a performance constraint -- that needing the body would double the run. That
+is true and it is the smaller reason. The bigger one is that heads-only is
+what makes form cycles resolvable at all: a body may call anything, so a pass
+that needed bodies would have to resolve every call before any export existed.
+
 ### The one real constraint: an export must derive from the HEAD
 
 C8's scan pass collects exports before generation. For that to be cheap, an
