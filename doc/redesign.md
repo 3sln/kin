@@ -429,38 +429,69 @@ Whole-file ownership means kin owns a unit ENTIRELY, and today it owns 43% of
 
 So regions are SCAFFOLDING with a defined end, not a feature.
 
-### COUNTED, and it changes the plan: no flint unit qualifies yet
+### RETRACTED: ownership percentage was never the constraint
 
-I guessed `hash`, `pike` and `interns` were nearly owned and said to count
-rather than assume. Counting says none of them are close. Percentage of each
-destination file that lives inside a kin region:
+I wrote here that no flint unit could adopt whole-file emission because kin
+owns only 43% of `map.rs`, and told the agent not to convert one. The author:
 
-| unit | rust | java | c# |
-| --- | --- | --- | --- |
-| `hash` | 19% | 31% | 40% |
-| `seqs` | 14% | 26% | 27% |
-| `interns` | -- | 20% | 21% |
-| `pike` | 4% | 8% | 8% |
-| `eq` | 4% | 9% | 9% |
-| `maps` | 43% | 57% | -- |
+> It doesn't matter if every destination file is majority hand written, the
+> generated part just needs to be extracted and the boundaries/interfacing
+> plugged in.
 
-The most kin owns of anything is 57%, and the units I expected to be nearly
-finished are the ones it owns LEAST. Every one of these files is majority
-hand-written.
+That is right and the section it replaces was wrong. The generated code does
+not stay in the file it sits in today -- it MOVES OUT into its own module, and
+the hand-written file imports it. "You cannot generate half a file" assumed
+the half had to stay put. It does not.
 
-So there is nothing in flint that can adopt whole-file emission today, and a
-plan that starts by converting a flint unit would discover that halfway
-through. Two consequences:
+This is the SECOND constraint in this document I invented from the same root
+cause. The first claimed Java needed partial classes. Both came from taking
+where flint's generated code happens to live today as though it were a
+requirement. The ownership percentages, which the previous version of this
+section made much of, are not a constraint on anything.
 
-* **prove the mechanism on `examples/go`**, which is greenfield and which kin
-  owns outright. That is what an example project is for, and it exercises
-  `:emit` end to end -- package line, wrapper, import anchor -- without
-  needing anything in flint to be finished first;
-* **flint keeps regions until the port catches up**, which is further off than
-  it looked an hour ago. The last region deleted is still the end of the port;
-  the port is simply younger than the numbers suggested.
+### The interfacing surface, measured on `runtime/src/map.rs`
 
-Do not delete splicing. Nothing in the real consumer could survive it.
+The file kin has worked on most: 1875 lines, 9 regions, 28 generated functions
+and 28 hand-written ones.
+
+    generated  -> hand-written    2 calls   bn_new  cn_copy_set_val
+    hand-written -> generated    14 calls   bn_datamap bn_key bn_node
+                                            bn_nodemap bn_val cn_count cn_key
+                                            cn_new cn_val is_bmnode node_assoc
+                                            node_dissoc node_find
+                                            node_find_scalar
+
+The dependency is strongly ONE-DIRECTIONAL: the hand-written half is mostly a
+consumer of the generated half, with two calls going the other way. That is a
+far better boundary than a 43/57 split suggests, and it is the number that
+matters rather than the percentage.
+
+What each language needs to plug it in:
+
+* **Rust** -- generated functions are `impl Rt` methods, and a crate may have
+  several inherent impls. A `maps_gen.rs` with its own `impl Rt` block needs
+  ONE `mod` line in `lib.rs` and nothing at any call site. Both back-calls
+  work unchanged, since both halves are methods on the same type.
+* **Java** -- generated becomes `class MapsGen` of statics; `Maps.java` adds
+  `import static com.flint.rt.MapsGen.*;` and its fourteen call sites stay
+  unqualified. `MapsGen` calls back to `Maps.bnNew(...)`; mutual references
+  between classes in a package are ordinary.
+* **C#** -- `partial class Maps` in a second file leaves call sites unchanged
+  in both directions, or a separate static class with `using static`.
+
+### Three questions the author's plan should settle
+
+1. **Granularity.** Nine regions in this one file. One generated module per
+   DESTINATION (`maps_gen.rs`), or one per kin NAMESPACE (`champ.rs`,
+   `merge.rs`, ...)? The `.targets` sidecars were consolidated; the nine
+   sources were not.
+2. **The two back-calls.** `bn_new` and `cn_copy_set_val` are hand-written and
+   called by generated code. Port them -- both look portable, `cn_copy_set_val`
+   is 23 lines and needs nothing kin lacks -- or accept a generated module
+   that depends on its host?
+3. **Naming.** Under C7 the path comes from the namespace, so the namespace
+   name IS the file name, and `flint.rt.maps` collides with the hand-written
+   `Maps`. That wants a convention rather than a suffix chosen once.
 
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
