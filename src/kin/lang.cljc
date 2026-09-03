@@ -209,7 +209,12 @@
       (sp/kin-declare!
        ctx nm
        (fn [c f]
-         (let [as (mapv (fn [x] (sp/kin-render c x)) (rest f))
+         ;; Every argument of a call sits between delimiters -- `(`, `,`,
+         ;; `)` -- so its outer parentheses can only be noise. This is the
+         ;; same rule `delimited?` applies to a template, arrived at from the
+         ;; other side: a declared call has no template to inspect, but its
+         ;; shape guarantees what a template would have to prove.
+         (let [as (mapv (fn [x] (strip-parens (sp/kin-render c x))) (rest f))
                code (str (if (or on-inst? (and method? (= :rust (t c))))
                            (str (first as) "." (target-name c nm)
                                 "(" (str/join ", " (rest as)) ")")
@@ -296,6 +301,27 @@
                                           n ": " ty " = " code ";\n")
                                (str ty " " n " = " code ";\n"))))))
       (doseq [f body] (sp/kin-statement! ctx f)))))
+
+(defn- local-form
+  "`(local ^:mut ^T x)` -- DECLARE a local without giving it a value.
+
+  Needed because a variable assigned on every branch of an `if` has no
+  sensible initialiser, and inventing one is not free: `let mut out: Value =
+  NIL;` makes rustc warn that the value is never read, where the hand-written
+  code says `let mut out: Value;` and warns about nothing. The not-worse rule
+  covers what a build prints, not only what it emits.
+
+  Rust requires the type annotation when there is no initialiser, which the
+  tag already supplies."
+  [default]
+  (fn [ctx form]
+    (let [nm (second form)
+          ty (get-in (or (sp/kin-tag ctx (:tag (meta nm))) default) [:types (t ctx)])
+          n (sp/local-name ctx nm)]
+      (sp/kin-emit! ctx (sp/indent-of ctx)
+                    (case (t ctx)
+                      :rust (str "let " (when (:mut (meta nm)) "mut ") n ": " ty ";\n")
+                      (str ty " " n ";\n"))))))
 
 (defn- defstruct-form
   "A small mutable record, declared the way each target declares one.
@@ -617,6 +643,7 @@
     '. field-form 'set (set-form (merge base-compound compound)) 'if if-form 'return return-form
     'comment comment-form 'doc doc-form
     'case case-form 'defconst defconst-form
+    'local (local-form default-tag)
     'for (for-form default-tag) 'while while-form
     'break (fn [ctx _] (sp/kin-emit! ctx (sp/indent-of ctx) "break;\n"))
     'continue (fn [ctx _] (sp/kin-emit! ctx (sp/indent-of ctx) "continue;\n"))
