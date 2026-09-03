@@ -174,14 +174,14 @@
 (defn- splice
   "`content` with the lines between the markers for `marker` replaced by
   `block`. The markers themselves stay."
-  [content marker block]
+  [content marker block where]
   (let [begin (str "kin:begin " marker)
         end (str "kin:end " marker)
         lines (str/split content #"\n" -1)]
-    (when-not (some #(str/includes? % begin) lines)
-      (throw (ex-info (str "kin: no `" begin "` marker") {:marker marker})))
-    (when-not (some #(str/includes? % end) lines)
-      (throw (ex-info (str "kin: no `" end "` marker") {:marker marker})))
+    (doseq [m [begin end]]
+      (when-not (some #(str/includes? % m) lines)
+        (throw (ex-info (str "kin: " where " has no `" m "` marker")
+                        {:marker marker :file where}))))
     (str/join
      "\n"
      (loop [out [] ls lines skip false]
@@ -197,9 +197,18 @@
   "The generated text as lines, each non-empty one indented by `n` spaces."
   [text n]
   (let [pad (apply str (repeat n " "))
-        ls (str/split text #"\n" -1)
-        ;; The text ends with a newline, so the split leaves one empty string
-        ;; that is the end of the file rather than a line of it.
+        ;; THE TRAILING BLANK LINE IS DELIBERATE, and it is an inheritance.
+        ;; The shell `emit` this replaces piped `kin gen`, which prints the
+        ;; text and then a newline of its own, into a block file -- so every
+        ;; committed region ends with a blank line before its end marker.
+        ;; That is an artifact of how the old pipeline printed rather than
+        ;; anything the generator meant, but it is in every host file in the
+        ;; tree, and a mechanism change that also reflows eighteen files is a
+        ;; diff nobody can read. Reproduced here; worth removing on purpose,
+        ;; in a commit that does only that.
+        ls (str/split (str text "\n") #"\n" -1)
+        ;; ... and the last split piece is the end of the text rather than a
+        ;; line of it.
         ls (if (= "" (last ls)) (butlast ls) ls)]
     (mapv (fn [l] (if (= "" l) l (str pad l))) ls)))
 
@@ -215,11 +224,18 @@
         ns-name (second ns)]
     (doseq [target emit-for]
       (if-let [file (destination target ns-name)]
-        (let [content (slurp file)
+        (let [_ (when-not (.exists (java.io.File. file))
+                  (throw (ex-info
+                          (str "kin: " target " sends " ns-name " to " file
+                               ", which does not exist. A region is written"
+                               " INTO a hand-written file, so the file and its"
+                               " markers come first.")
+                          {:target target :namespace ns-name :file file})))
+              content (slurp file)
               block (block-lines (second (first (filter (fn [[t _]] (= t target))
                                                         (generate path))))
                                  (indent-for target ns-name))]
-          (spit file (splice content path block))
+          (spit file (splice content path block file))
           (println (format "  %-8s %s" (name target) file)))
         (println (format "  %-8s (no destination -- generated and not written)"
                          (name target)))))))
