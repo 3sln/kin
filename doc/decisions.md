@@ -21,7 +21,8 @@ lost is still the argument a future reader will re-invent.
 | F | what a tree-wide `emit-all!` does with a failure | **OVERRULED** — the whole batch reverts |
 | G | how a target says it produces a whole file | **DECIDED** — it has an `:emit`; there is no second key |
 | — | precedence: own definitions vs imported names | **OPEN** — recommendation below, not settled |
-| — | what `declare` means with no runtime | **OPEN** — strict implemented, head-carrying recommended |
+| — | what `declare` means with no runtime | **ANSWERED by the promise model** — a bare declare defers |
+| H | provenance format for an unsettled node | **DECIDED** — form, label, deps by kind, and which failure |
 
 ---
 
@@ -423,6 +424,51 @@ flint source currently defines a name it also imports, so the change would be
 invisible to `check-kin` — a semantic change with no gate on it is exactly the
 kind this project has been bitten by. It wants either a deliberate decision to
 take it untested, or a source written to exercise it first.
+
+## H — The provenance format for an unsettled node
+
+Left to me, with one standing requirement: it must name which node, from
+which source form, waiting on what. "Something did not settle" is the useless
+error this project keeps removing.
+
+**Decided: an unsettled node carries `{:deps {...} :origin {...}}`**, and the
+message is one block per node.
+
+```
+kin: 1 reference never settled.
+  seqs.kin: (ls-thunk rt a)
+      waiting on forms ls-thunk
+  Nothing defines what they wait on.
+```
+
+Four choices in that, each for a reason:
+
+* **The source FORM, printed, not a line number.** kin reads with
+  `clojure.edn/read-string`, which does not carry line metadata, so a line
+  number would be a lie or a second reader. The form is what the author
+  wrote and is more use than a coordinate: `(ls-thunk rt a)` is searchable
+  and self-explaining where `seqs.kin:41` is neither.
+* **The source LABEL beside it**, because a batch emits sixteen sources and
+  the form alone does not say which.
+* **What it waited on, BY KIND** -- `forms ls-thunk`, `tags Node`. The
+  dependency set is data, which is the whole reason a good message is
+  possible at all; printing it by kind keeps `a form is missing` and `a tag
+  is missing` from reading identically.
+* **A closing line that names WHICH FAILURE it is.** A reference never
+  defined and a genuine cycle are the same observable state -- unsettled at
+  join -- and the reader needs to be told which, not left to work it out:
+
+      Nothing defines what they wait on.
+      These wait on each other: a b -- a cycle, not a missing definition.
+
+  It is derived rather than guessed: a node whose dependencies intersect what
+  the unsettled set PROVIDES is in a cycle; one whose do not was never
+  defined.
+
+**What is deliberately not in it.** No stack trace, no internal node id, no
+count of settling passes. Those describe kin's execution; the reader is
+debugging their source, and every line that is about kin rather than about
+their code is a line they have to skip.
 
 ## What kin owes, after both corrections
 
