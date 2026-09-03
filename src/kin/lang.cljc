@@ -341,8 +341,15 @@
         ;; can fail; Rust turns the return type into `Result<T, String>` and a
         ;; call to it gets `?`, and Java and C# ignore the mark entirely because
         ;; an exception needs nothing in either place.
+        ;; VISIBILITY IS A MODULE QUESTION NOW. A source is its own file, so
+        ;; every function it defines is reached from outside the file it
+        ;; lives in -- and the DEFAULT has to be "visible to the rest of the
+        ;; compilation unit" rather than "visible in this file", which is
+        ;; what an unmarked `fn` means in Rust and an unmarked member means
+        ;; in C#. `^:pub` still means the wider thing: part of the crate's
+        ;; public API rather than of the crate.
         :rust (kin/emit!
-               ctx (kin/indent-of ctx) (if pub? "pub fn " "fn ") (target-name ctx nm) "("
+               ctx (kin/indent-of ctx) (if pub? "pub fn " "pub(crate) fn ") (target-name ctx nm) "("
                ;; `^:mut` on a PARAMETER. Rust is the only one of the three
                ;; that has to say a parameter is reassigned; Java and C# read
                ;; the mark and emit nothing, which is the ordinary shape of a
@@ -360,8 +367,17 @@
                " {\n")
         :java (kin/emit!
                ctx (kin/indent-of ctx)
-               (cond on-inst? (if pub? "public " "")
-                     pub? "public static " :else "static ")
+               ;; JAVA HAS NO ASSEMBLY-SCOPED VISIBILITY, and that is the one
+               ;; place this costs something real. Rust has `pub(crate)` and
+               ;; C# has `internal`; Java has package-private or public and
+               ;; nothing between. A generated module is a package of its
+               ;; own -- it has to be, or a source named after the file it
+               ;; used to be spliced into collides with that file's class --
+               ;; so everything that crosses the boundary is `public`, and
+               ;; `^:pub` stops distinguishing anything HERE. It still does
+               ;; on the other two.
+               (cond on-inst? "public "
+                     :else "public static ")
                (if ret (ty ret) "void") " " (target-name ctx nm) "("
                (str/join ", " (cons* (when (and recv (not on-inst?))
                                        (str (ty (:tag (meta recv))) " " recv))
@@ -372,7 +388,7 @@
                  ;; package-private, so an unmarked instance method needs
                  ;; `internal` to mean what the Java one means.
                  (cond on-inst? (if pub? "public " "internal ")
-                       pub? "public static " :else "static ")
+                       pub? "public static " :else "internal static ")
                  (if ret (ty ret) "void") " " (target-name ctx nm) "("
                  (str/join ", " (cons* (when (and recv (not on-inst?))
                                          (str (ty (:tag (meta recv))) " " recv))
@@ -792,9 +808,11 @@
     (kin/emit!
      ctx (kin/indent-of ctx)
      (case (t ctx)
-       :rust (str (when pub? "pub ") "const " cn ": " ty " = " lit ";\n")
-       :java (str (if pub? "public " "") "static final " ty " " cn " = " lit ";\n")
-       :csharp (str (if pub? "public " "") "const " ty " " cn " = " lit ";\n")))
+       ;; Same rule as `defn`, and for the same reason: a constant defined
+       ;; in a generated module is read from outside it.
+       :rust (str (if pub? "pub " "pub(crate) ") "const " cn ": " ty " = " lit ";\n")
+       :java (str "public static final " ty " " cn " = " lit ";\n")
+       :csharp (str (if pub? "public " "internal ") "const " ty " " cn " = " lit ";\n")))
     (kin/define-name!
      ctx {:scope (if pub? :public :private)} nm (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))))
 

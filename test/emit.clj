@@ -93,7 +93,7 @@
       [true true] [(str/includes? written "kin:begin thing.kin")
                    (str/includes? written "kin:end thing.kin")])
   (is "3. the block is indented by the target's :indent"
-      true (str/includes? written "    fn twice(&self, a: i32) -> i32 {"))
+      true (str/includes? written "    pub(crate) fn twice(&self, a: i32) -> i32 {"))
   ;; 4. The ghost target generates and is written nowhere. That has to be
   ;; expressible: a source can exist to be VERIFIED rather than shipped.
   (is "4. a target whose :path answers nil is written nowhere"
@@ -294,7 +294,7 @@
       ["alpha" "middle" "zeta"] @collected)
   (is "12. and the header is emitted in sorted order"
       "use alpha;\nuse middle;\nuse zeta;\n"
-      (subs written 0 (str/index-of written "fn "))))
+      (subs written 0 (str/index-of written "pub(crate) fn "))))
 
 ;; Two namespaces cannot BE the same file. The region path allows several
 ;; writers per destination; this one cannot, and says so.

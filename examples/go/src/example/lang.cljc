@@ -62,8 +62,11 @@
   [ctx form]
   (let [[_ nm params & body] form
         ret (:tag (meta nm))]
+    ;; `:public` means LOCAL AND EXPORTED: a `defn` here is callable from
+    ;; the rest of its own file and from any file that requires it. This
+    ;; example has one source, so only the first half is exercised.
     (kin/define-form!
-     ctx nm
+     ctx {:scope :public} nm
      (fn [c f]
        (kin/tagged! c (kin/tag c ret))
        (let [as (mapv (fn [x] (kin/render c x)) (rest f))]
