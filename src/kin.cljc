@@ -232,13 +232,50 @@
   "The GENERATE pass: produce text."
   (-emitting? [this]))
 
-(defrecord GenContext [driver target out pre promises scope indent]
-  Scoped (-scope [_] scope)
-  Emitting (-emitting? [_] true))
+(defprotocol Linked
+  "THE HANDOFF CHANNEL between the two passes.
 
-(defrecord LinkContext [driver target scope indent]
+  Link writes, generate reads: per form, how the reference in its head should
+  be emitted. It is a third thing both context types carry, beside the scope
+  stack and their own capability, because it is the whole point of having two
+  passes -- resolve, then emit what was resolved."
+  (-resolutions [this]))
+
+(defn resolution-store
+  "Where link records what it resolved, keyed by form IDENTITY.
+
+  IDENTITY, NOT VALUE, and this is the trap in the whole design. Two
+  `(return x)` forms in different functions are `=`, so a Clojure map would
+  merge them and hand one function's resolution to the other -- silently, and
+  producing code that compiles. The reader is the same object each time it is
+  walked, so identity is exactly the right key."
+  []
+  #?(:clj (java.util.IdentityHashMap.) :default (atom {})))
+
+(defn record-resolution!
+  "Link: this form's head resolves this way."
+  [ctx form res]
+  (when-let [store (and (satisfies? Linked ctx) (-resolutions ctx))]
+    #?(:clj (.put ^java.util.IdentityHashMap store form res)
+       :default (swap! store assoc form res)))
+  nil)
+
+(defn resolution
+  "Generate: how did link say to emit this form's head?"
+  [ctx form]
+  (when-let [store (and (satisfies? Linked ctx) (-resolutions ctx))]
+    #?(:clj (.get ^java.util.IdentityHashMap store form)
+       :default (clojure.core/get @store form))))
+
+(defrecord GenContext [driver target out pre promises scope indent resolutions]
   Scoped (-scope [_] scope)
-  Declaring (-declaring? [_] true))
+  Emitting (-emitting? [_] true)
+  Linked (-resolutions [_] resolutions))
+
+(defrecord LinkContext [driver target scope indent resolutions]
+  Scoped (-scope [_] scope)
+  Declaring (-declaring? [_] true)
+  Linked (-resolutions [_] resolutions))
 
 (defn- require-capability!
   [ctx protocol what]
@@ -268,7 +305,11 @@
    ;; in by then.
    :promises (atom [])
    :scope {}
-   :indent 0}))
+   :indent 0
+   ;; Filled by the LINK pass and read here. Empty when nothing linked, in
+   ;; which case resolution falls back to asking directly -- which is what a
+   ;; sub-render does.
+   :resolutions (resolution-store)}))
 
 (defn scoped
   "Call `f` with `ctx` extended by one scoped entry.
@@ -1035,6 +1076,71 @@
       (w ctx (fn [inner] (run inner)))
       (run ctx))))
 
+;; ------------------------------------------------------------------- link
+;;
+;; RESOLUTION IS POSITIONAL, so it needs an ordered walk.
+;;
+;; "Locals win once declared" is not a precedence rule that a static lookup
+;; can answer -- it is a question about a POINT in the file: is this declared
+;; by HERE? Only a phase walking in order knows, so the declare phase becomes
+;; a LINK phase: it walks everything, bodies included, resolves every
+;; reference, and RECORDS how each should be emitted. Generate then emits what
+;; link decided rather than deciding again, which is the two-pass shape every
+;; compiler has -- resolve, then emit.
+;;
+;; Only the EXPORT half can stop at a head. A reference lives INSIDE a body,
+;; so link has to go in.
+
+(defn- resolve-reference
+  "How should `head` be emitted, at THIS point in the walk?
+
+  Locals first, because a local that has been declared by here is what the
+  reader means. That is the reversal the link phase exists to make possible:
+  the old rule asked the require scope first, which was right when a require
+  could only bring in `let` and `if`, and wrong once it can bring in another
+  module's function names."
+  [ctx head]
+  (cond
+    (clojure.core/get (some-> (:locals ctx) deref) head)
+    {:kind :local :sym head}
+
+    (clojure.core/get (:scope-syms ctx) head)
+    (let [[vname k] (clojure.core/get (:scope-syms ctx) head)]
+      {:kind :vocabulary :namespace vname :sym k})
+
+    :else nil))
+
+(defn implementation-of
+  "The implementation a recorded resolution names, looked up HERE.
+
+  Link decides the KIND -- local, or from which vocabulary -- and generate
+  looks the value up in its own registries. So the decision crosses the
+  handoff channel while the closure stays the one generate built, which is
+  what keeps a link-built closure from carrying link's context into generated
+  text."
+  [ctx res]
+  (case (:kind res)
+    :local (clojure.core/get (some-> (:locals ctx) deref) (:sym res))
+    :vocabulary (get-in ctx [:vocabs (:namespace res) :forms (:sym res)])
+    nil))
+
+(defn link!
+  "Walk `form` in order, resolving every reference and recording it.
+
+  A form's `:declare` slot runs BEFORE its children are walked, so a `defn`
+  is in scope inside its own body and everything after it -- which is what
+  makes `is this declared by here?` answerable."
+  [ctx form]
+  (when (and (seq? form) (symbol? (first form)))
+    (let [head (first form)
+          res (resolve-reference ctx head)]
+      (record-resolution! ctx form res)
+      (when-let [impl (form-fn ctx head)]
+        (run-slot (form-slots impl) :declare ctx form))))
+  (when (coll? form)
+    (doseq [x form] (link! ctx x)))
+  nil)
+
 (defn dispatch
   "One form. A seq whose head is in scope goes to its implementation.
 
@@ -1045,7 +1151,15 @@
   [ctx form]
   (cond
     (and (seq? form) (symbol? (first form)))
-    (if-let [f (form-fn ctx (first form))]
+    ;; WHAT LINK DECIDED WINS. Generate emits the resolution rather than
+    ;; recomputing it, which is the whole point of the two passes: by the time
+    ;; anything is emitted the question `what does this name mean here` has
+    ;; already been answered, in order, by something that could see the order.
+    ;; A form with no recorded resolution -- a sub-render, or a project that
+    ;; never linked -- asks directly, exactly as before.
+    (if-let [f (or (when-let [res (resolution ctx form)]
+                     (implementation-of ctx res))
+                   (form-fn ctx (first form)))]
       ;; A DECLARED-BUT-NOT-YET-DEFINED head DEFERS. This is the bare
       ;; `(declare foo)` case: there is no signature to emit a call from, so
       ;; the reference becomes a promise waiting on `foo` and settles the

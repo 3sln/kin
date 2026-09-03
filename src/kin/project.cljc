@@ -347,6 +347,22 @@
                    :exports (:exports-atom prj)
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))]
+    ;; LINK FIRST, over the same registries generate will use. It walks every
+    ;; form in order, resolves each reference against what is declared BY THAT
+    ;; POINT, and records the answer; generate then emits what it decided.
+    ;; LINK FIRST, and LINK'S REGISTRIES ARE ITS OWN. They exist to answer
+    ;; `is this declared by HERE?` and nothing else; the closure a call is
+    ;; emitted through is the one GENERATE builds, in generate's own ordered
+    ;; walk. Sharing them would let a marker link registered be CALLED during
+    ;; generate, for a function generate has not reached yet.
+    ;;
+    ;; What crosses between them is the RESOLUTION STORE, and only that.
+    (kin/link! (kin/map->LinkContext
+                (assoc (into {} ctx)
+                       :scope {} :indent 0
+                       :resolutions (kin/-resolutions ctx)
+                       :locals (atom {}) :local-tags (atom {}) :names (atom {})))
+               (cons 'do (:forms analysis)))
     (if-let [emit (get-in prj [:targets target :emit])]
       (emit ctx (:all-forms analysis))
       (doseq [f (:forms analysis)] (kin/statement! ctx f)))

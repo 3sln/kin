@@ -192,6 +192,16 @@
 (defn- defn-form
   "A function, framed the way each target frames one.
 
+  THREE SLOTS, and the split is what the link phase needs. `:declare`
+  registers the name and nothing else, so that link -- walking in order --
+  knows the function is in scope from this point on and can resolve later
+  references to it as LOCAL. `:generate` registers again (idempotently, and
+  with a closure built in the generate context) and emits the function.
+
+  Registering in both is deliberate rather than redundant: link must see the
+  name to answer `is this declared by here?`, and generate must own the
+  closure so that no link-context value reaches generated text.
+
   The signature is where three languages disagree most and it is entirely
   mechanical: a return type before or after, `static` or `fn`, `self` or not.
 
@@ -200,7 +210,18 @@
   into the vocabulary, and a helper in the vocabulary is a helper written three
   times -- which is the thing this whole exercise exists to stop."
   [default]
-  (fn [ctx form]
+  {;; LINK: register the name and stop. Link needs only to know that this
+   ;; function is in scope from here on, so that a later reference resolves
+   ;; as LOCAL rather than reaching past it to a vocabulary. It registers a
+   ;; MARKER, never a callable -- link's registries answer `declared by
+   ;; here?` and nothing else, and the closure generate calls is the one
+   ;; generate builds.
+   :declare
+   (fn [ctx form]
+     (let [nm (second form)]
+       (kin/define-form! ctx {:scope (if (:pub (meta nm)) :public :private)} nm {})))
+   :generate
+   (fn [ctx form]
     (let [[_ nm params & body] form
           ret (:tag (meta nm))
           throws? (:throws (meta nm))
@@ -375,7 +396,7 @@
             inner {:key :throws :value throws? :indent (if wrap? 1 0)}
             (fn [in2] (doseq [f body] (kin/statement! in2 f))))
            (when wrap? (kin/emit! inner (kin/indent-of inner) "}\n")))))
-      (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
+      (kin/emit! ctx (kin/indent-of ctx) "}\n")))})
 
 (defn- let-form [default]
   (fn [ctx form]
