@@ -20,11 +20,33 @@
            (edn/read-string (slurp "kin.edn"))
            {:vocabularies []}))
 
-(def targets
-  (let [t (:targets cfg [:rust :java :csharp])]
-    (if (map? t)
-      (reduce-kv (fn [m k v] (assoc m k (merge (get target/defaults k) v))) {} t)
-      (select-keys target/defaults t))))
+(defn- load-targets
+  "The project's targets, in whichever of three ways it said them.
+
+      [:rust :java :csharp]     kin's defaults, by name
+      {:rust {...} ...}         descriptors, merged onto the defaults
+      my.project.targets        a NAMESPACE whose `targets` var holds them
+
+  The third exists because a target now carries `:path`, a function from
+  namespace to file, and a function cannot be written in EDN. That is the
+  consequence the correction told us to design for rather than refuse: if
+  destination is computed, the config that says how to compute it is code."
+  [t]
+  (cond
+    (symbol? t)
+    (do (require t)
+        (let [var (or (resolve (symbol (str t) "targets"))
+                      (throw (ex-info
+                              (str "kin: " t " declares no `targets`. A target"
+                                   " namespace is a var holding a map of"
+                                   " target descriptors.")
+                              {:namespace t})))
+              v (if (fn? @var) (@var) @var)]
+          (reduce-kv (fn [m k d] (assoc m k (merge (get target/defaults k) d))) {} v)))
+    (map? t) (reduce-kv (fn [m k v] (assoc m k (merge (get target/defaults k) v))) {} t)
+    :else (select-keys target/defaults t)))
+
+(def targets (load-targets (:targets cfg [:rust :java :csharp])))
 
 ;; The order a project WROTE its targets in, which is the order every command
 ;; prints them in. A set has no order and `(keys targets)` has an accidental
@@ -32,7 +54,7 @@
 ;; reordering.
 (def target-order
   (let [t (:targets cfg [:rust :java :csharp])]
-    (vec (if (map? t) (keys t) t))))
+    (vec (if (or (map? t) (symbol? t)) (keys targets) t))))
 
 ;; A VOCABULARY IS ONE VAR, holding one map.
 ;;
@@ -112,6 +134,112 @@
         [target (kin/kin-output ctx)]))))
 
 
+(def source-glob (:sources cfg "kin/*.kin"))
+
+(defn sources []
+  (sort (map str (fs/glob "." source-glob))))
+
+;; ------------------------------------------------------------------ emit
+;;
+;; WHERE A NAMESPACE'S CODE GOES IS COMPUTED, NOT LISTED.
+;;
+;; Each target carries `:dest` (a root) and `:path` (a function from namespace
+;; to file under it), so the answer is deterministic and there is no table.
+;; This replaced a per-source sidecar -- `<source>.targets`, three columns of
+;; target, file and indent, sixteen of them in the one project using kin, each
+;; a restatement of a rule nobody had written down.
+;;
+;; `emit` lives HERE rather than in a shell script for exactly that reason: a
+;; destination that is a function cannot be read by `while read -r`. That was
+;; named as a consequence to design for rather than a reason to keep the data
+;; shape a shell script could read.
+
+(defn destination
+  "Where `ns-name` goes for `target`, or nil if it goes nowhere.
+
+  NIL IS A LEGITIMATE ANSWER. A source can generate for a target and be
+  written nowhere -- `unsigned.kin` in the flint tree generates for three
+  targets and exists to be verified rather than shipped. `generates for` and
+  `is written somewhere` are different questions."
+  [target ns-name]
+  (let [d (get targets target)
+        rel (when-let [f (:path d)] (f ns-name))]
+    (when rel
+      (if-let [root (:dest d)] (str root "/" rel) rel))))
+
+(defn- indent-for [target ns-name]
+  (let [i (:indent (get targets target))]
+    (cond (fn? i) (or (i ns-name) 0) (number? i) i :else 0)))
+
+(defn- splice
+  "`content` with the lines between the markers for `marker` replaced by
+  `block`. The markers themselves stay."
+  [content marker block]
+  (let [begin (str "kin:begin " marker)
+        end (str "kin:end " marker)
+        lines (str/split content #"\n" -1)]
+    (when-not (some #(str/includes? % begin) lines)
+      (throw (ex-info (str "kin: no `" begin "` marker") {:marker marker})))
+    (when-not (some #(str/includes? % end) lines)
+      (throw (ex-info (str "kin: no `" end "` marker") {:marker marker})))
+    (str/join
+     "\n"
+     (loop [out [] ls lines skip false]
+       (if-let [l (first ls)]
+         (cond
+           (str/includes? l begin) (recur (into (conj out l) block) (rest ls) true)
+           (str/includes? l end) (recur (conj out l) (rest ls) false)
+           skip (recur out (rest ls) true)
+           :else (recur (conj out l) (rest ls) false))
+         out)))))
+
+(defn- block-lines
+  "The generated text as lines, each non-empty one indented by `n` spaces."
+  [text n]
+  (let [pad (apply str (repeat n " "))
+        ls (str/split text #"\n" -1)
+        ;; The text ends with a newline, so the split leaves one empty string
+        ;; that is the end of the file rather than a line of it.
+        ls (if (= "" (last ls)) (butlast ls) ls)]
+    (mapv (fn [l] (if (= "" l) l (str pad l))) ls)))
+
+(defn emit
+  "Write `path`'s output into each target's file, between the markers.
+
+  The marker is the SOURCE PATH, which is what every host file already says.
+  Under one-source-per-destination that could become the namespace; changing
+  it would rewrite every region in every host file, so it is left alone here
+  and belongs to whichever commit does the consolidation."
+  [path]
+  (let [{:keys [ns emit-for]} (read-source path)
+        ns-name (second ns)]
+    (doseq [target emit-for]
+      (if-let [file (destination target ns-name)]
+        (let [content (slurp file)
+              block (block-lines (second (first (filter (fn [[t _]] (= t target))
+                                                        (generate path))))
+                                 (indent-for target ns-name))]
+          (spit file (splice content path block))
+          (println (format "  %-8s %s" (name target) file)))
+        (println (format "  %-8s (no destination -- generated and not written)"
+                         (name target)))))))
+
+(defn destinations
+  "Every file kin would write, one per line.
+
+  A gate needs this: `bin/check-kin` snapshots each generated file, re-emits,
+  and compares. It used to gather that list by `cat`-ing the sidecars, which
+  is not available once destination is a function."
+  []
+  (doseq [f (sort (distinct (for [p (sources)
+                                  :let [src (try (read-source p) (catch Exception _ nil))]
+                                  :when src
+                                  t (:emit-for src)
+                                  :let [d (destination t (second (:ns src)))]
+                                  :when d]
+                              d)))]
+    (println f)))
+
 ;; ------------------------------------------------------------------- why
 ;;
 ;; TWO QUESTIONS THAT WERE ONLY ANSWERABLE BY READING THE GENERATOR.
@@ -122,11 +250,6 @@
 ;; failed to compile for the whole of the work that followed and every gate
 ;; stayed green. A command that prints where each symbol comes from makes
 ;; "it comes from nowhere" a thing you can look at.
-
-(def source-glob (:sources cfg "kin/*.kin"))
-
-(defn sources []
-  (sort (map str (fs/glob "." source-glob))))
 
 (defn- symbols-in
   "Every symbol in `form`, and every symbol used as a `^Tag`."
@@ -347,7 +470,11 @@
                          (println)
                          (System/exit 1))))
     "targets" (targets-report)
+    "emit" (if path
+             (emit path)
+             (doseq [p (sources)] (println p) (emit p)))
+    "destinations" (destinations)
     (do (println "kin: unknown command" (pr-str cmd))
-        (println "usage: kin gen|why <source.kin>")
-        (println "       kin targets")
+        (println "usage: kin gen|why|emit <source.kin>")
+        (println "       kin targets|destinations|emit")
         (System/exit 2))))

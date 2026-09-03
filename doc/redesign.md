@@ -35,6 +35,37 @@ What kin owes is therefore narrow, which is the point:
 Nothing else. An implementation that finds itself asking what a tag means has
 gone wrong.
 
+## C1b — A tag WRITTEN AT THE CALL SITE passes down
+
+Verbatim:
+
+> Also make sure something like `(foo ^MyTag (bar ...) ^MyOtherTag (baz ...))`
+> passes the user provided tags down.
+
+So an argument's tag has two possible sources, and the explicit one wins:
+
+1. what the inner form declares its product to be — `(bar ...)` says `Value`;
+2. a `^Tag` written on the argument AT THE CALL SITE — which OVERRIDES it.
+
+`foo` above must see two arguments, one tagged `MyTag` and one `MyOtherTag`,
+whatever `bar` and `baz` say about themselves. That is the escape hatch that
+makes the whole scheme usable: a form cannot always know what it produced, and
+the person writing the call often does.
+
+Note what this does NOT mean. kin still does not interpret `MyTag` — it is an
+arbitrary symbol, it need not be a declared tag, and kin never asks whether it
+is compatible with anything. kin's whole job here is to CARRY it from where it
+was written to the form that receives it. Per C1, what `foo` does with a tag
+it has never heard of is `foo`'s business.
+
+Two consequences worth designing for rather than discovering:
+
+* metadata must survive reading. `^MyTag (bar ...)` puts metadata on the LIST
+  `(bar ...)`, and anything that rebuilds forms while walking them will drop it
+  unless it is careful.
+* the annotation is on the ARGUMENT, so it must be read where the argument is
+  rendered, not where the form is looked up.
+
 ## C2 — Destination is COMPUTED from the namespace. Decision A is overruled.
 
 Verbatim:

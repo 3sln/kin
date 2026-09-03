@@ -14,6 +14,33 @@
     :local-name  (fn [ctx sym] -> String) for a local
     :fn-name     (fn [ctx sym] -> String) for a function
     :reserved    words this language will not accept as an identifier
+    :dest        where this target's files live -- a root path
+    :path        (fn [ns] -> String or nil) namespace -> file, under :dest
+    :indent      (fn [ns] -> int) how deep the region sits in its file
+                 -- PROVISIONAL, see below
+
+  DESTINATION IS COMPUTED, NOT LISTED. `:dest` and `:path` are how a target
+  says where a namespace's generated code goes, and the pair is deterministic:
+  give it a namespace and it answers a file, with no table anywhere. That
+  replaces a per-source sidecar listing target, file and indent -- sixteen of
+  them in the one project using kin, each a restatement of a rule nobody had
+  written down.
+
+  `:path` MAY ANSWER NIL, and that is not an error. A source can generate for
+  a target and be written nowhere: `unsigned.kin` in the flint tree generates
+  for three targets and exists to be VERIFIED rather than shipped. `Generates
+  for` and `is written somewhere` are different questions and have to stay
+  separable.
+
+  `:indent` IS PROVISIONAL. It stands in for `:wrap`, whose semantics were
+  never written down: the generated code sits inside `impl Rt { }` in Rust and
+  `class Maps { }` on the ports, and that surrounding text is HAND-WRITTEN in
+  the host files today with the kin markers nested inside it. Whether `:wrap`
+  owns that text (so kin generates the `impl` line and the host files change
+  shape) or only the indent it implies (so they do not) is not recoverable
+  from the mention that introduced it, so it is asked rather than guessed --
+  `doc/decisions.md`, under `Open, and not to be guessed`. When answered,
+  `:indent` is what `:wrap` replaces.
 
   The name mappers are FUNCTIONS OF THE CONTEXT, not of the symbol alone.
   That matters for more than tidiness: a name may need to depend on what
