@@ -112,7 +112,7 @@
 (def ^:private marker-pattern #"@kin:([a-z]+(?::[a-z]+)*):")
 
 (def ^:private markers
-  "Every marker there is, and how many values follows each.
+  "Every marker there is, and how many values each is followed by.
 
   `@kin:ns:` takes one -- the namespace. A definition takes TWO, the kin
   symbol and then the payload, in that order because that is the order the
