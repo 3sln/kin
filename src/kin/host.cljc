@@ -579,8 +579,8 @@
   This is where the namespace stops being about annotations: what comes out is
   a value a project puts in its `:vocabularies` beside a hand-written one, and
   nothing downstream can tell them apart. A source requires it by name, the
-  require scope resolves through it, `why` attributes symbols to it, and none
-  of them know an annotation was involved.
+  require scope resolves through it, `source-origins` attributes symbols to
+  it, and none of them know an annotation was involved.
 
   Plural because `@kin:link:ns:` is per file, so one host tree may declare
   into several kin namespaces -- a package per namespace is the obvious layout

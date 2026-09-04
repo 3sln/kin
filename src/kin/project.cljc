@@ -35,16 +35,16 @@
 
   TWO KINDS OF VFS, doing different jobs. The SOURCE vfs scans and reads --
   it is the only one that ever lists. Each TARGET's vfs reads and writes its
-  destinations and never lists. Giving the sources one is what turns `why`
-  and `targets-report` from commands that glob a real tree into functions
-  over a config, which is the only reason they can be tested at all.
+  destinations and never lists. Giving the sources one is what turns
+  `source-origins` and `targets-report` from commands that glob a real tree
+  into functions over a config, which is the only reason they can be tested
+  at all.
 
   `:host` is what a host tree declared about itself, read by `kin.host` and
   interpreted by the targets. Its vocabularies join `:vocabularies` and are
   indistinguishable from hand-written ones from there on; what it keeps
-  separately is the METADATA the targets answered, which is what
-  `kin.host/disagreements` cross-checks the targets with and what
-  `usage-problems` checks the call sites against.
+  separately is the METADATA the targets answered, which is what `report`
+  cross-checks the targets with, and the call sites against.
 
   `project` builds one from vocabularies you already have. `load-project`
   is the convenience that resolves them from namespace names, and it is the
@@ -261,8 +261,8 @@
 
   This is the whole trick and it is why `require-scope` needs no change:
   requiring `runtime.merge` goes down the identical path as requiring
-  `flint.impl.rt`, so `:refer`, aliases, first-match-wins and `why`'s
-  attribution all work already. If this ever needs a second resolution path,
+  `flint.impl.rt`, so `:refer`, aliases, first-match-wins and the attribution
+  in `source-origins` all work already. If this ever needs a second resolution path,
   something has gone wrong."
   [ns-name kinds]
   (let [targets-of (fn [by-sym] (set (mapcat keys (vals by-sym))))
@@ -313,12 +313,12 @@
      ;; the file looks like needs the declaration that names it.
      :all-forms (vec all)
      :scope (when ns-form (kin/require-scope ns-form vocabs))
-     :report report
+     :target-report report
      ;; What this source generates for HERE: what it asks for, narrowed to
      ;; what the project has a target description for. The two are different
-     ;; questions and `why` shows both -- a vocabulary speaking a language the
-     ;; project has not configured is not an error, it is a project that has
-     ;; not asked for it yet.
+     ;; questions and `source-origins` shows both -- a vocabulary speaking a
+     ;; language the project has not configured is not an error, it is a
+     ;; project that has not asked for it yet.
      :emit-for (let [want (if report (:targets report) (set order))
                      have (filterv want order)]
                  (when (empty? have)
@@ -374,7 +374,7 @@
                    ;; The order the source REQUIRED its vocabularies in, so
                    ;; `literal-tag` can ask them first-match-first -- the same
                    ;; rule the require scope resolves by.
-                   :vocab-order (:required (:report analysis))
+                   :vocab-order (:required (:target-report analysis))
                    :targets (:targets prj)
                    :exports (:exports-atom prj)
                    :locals (atom {}) :names (atom {})
@@ -687,18 +687,26 @@
                        :when d]
                    [t (second d)]))))))
 
-;; --------------------------------------------------------------------- why
+;; ----------------------------------------------------------- source-origins
 ;;
-;; TWO QUESTIONS THAT WERE ONLY ANSWERABLE BY READING THE GENERATOR, and both
-;; answered as DATA. Printing is the caller's business, which is what makes
-;; them usable from something that is not a terminal.
+;; QUESTIONS THAT WERE ONLY ANSWERABLE BY READING THE GENERATOR, all answered
+;; as DATA. Printing is the caller's business, which is what makes them usable
+;; from something that is not a terminal.
 ;;
-;; `why` is the one that would have caught the two worst bugs this tool has
-;; produced. `LS_THUNK` was missing from a name table, so it fell through to
-;; the local namer and emitted an identifier C# does not have; the CLR failed
-;; to compile for the whole of the work that followed and every gate stayed
-;; green. A report saying where each symbol comes from makes "it comes from
-;; nowhere" a thing you can look at.
+;; `source-origins` is the one that would have caught the two worst bugs this
+;; tool has produced. `LS_THUNK` was missing from a name table, so it fell
+;; through to the local namer and emitted an identifier C# does not have; the
+;; CLR failed to compile for the whole of the work that followed and every
+;; gate stayed green. A report saying where each symbol comes from makes "it
+;; comes from nowhere" a thing you can look at.
+;;
+;; IT USED TO BE CALLED `why`, and the name was the worst thing about it. A
+;; report is named for what it answers, and `why` names only that a question
+;; was asked -- so every mention of it in a doc had to say what it did, and
+;; `(why prj "champ.kin")` at a call site said nothing at all. It answers
+;; where each symbol in a source ORIGINATES, so that is its name, and it joins
+;; the `source-label`/`source-text`/`source-labels` family that already reads
+;; as `this question, of that source`.
 
 (defn- symbols-in
   "Every symbol in `form`, and every symbol used as a `^Tag`."
@@ -718,8 +726,8 @@
   "Names the source BINDS: parameters, let bindings, loop variables.
 
   Resolved through the source's require scope, so a file that aliased its
-  `let` still has its bindings found. This is a heuristic and `why` is
-  diagnostic output rather than a gate -- but the bucket it separates out,
+  `let` still has its bindings found. This is a heuristic and `source-origins`
+  is diagnostic output rather than a gate -- but the bucket it separates out,
   `a local you bound` against `a symbol that comes from nowhere`, is exactly
   the distinction the LS_THUNK bug hid in."
   [forms scope]
@@ -749,11 +757,11 @@
         (contains? (:names vocab) k) :name
         :else :unknown))
 
-(defn why
+(defn source-origins
   "Where everything in a source comes from, as DATA.
 
       :label       what the source was called
-      :report      the target computation (see `kin/target-report`)
+      :target-report  the target computation (see `kin/target-report`)
       :emit-for    what it generates for HERE
       :unconfigured  targets it asks for that this project does not describe
       :failure     the message, if rendering it threw
@@ -768,16 +776,22 @@
   Rendering the source first is what makes `:declared` exact rather than
   guessed: `defn` registers its own name while it emits, so the file's
   declarations are read back from the render rather than inferred from its
-  shape. A RENDER THAT THROWS still answers -- `why` is the report you reach
+  shape. A RENDER THAT THROWS still answers -- this is the report you reach
   for BECAUSE generation broke, so the failure is recorded and the tables are
-  built from however far it got."
-  ([prj label] (why prj (source-text prj label) label))
+  built from however far it got.
+
+  The target computation is under `:target-report` rather than `:report`,
+  which is what it used to be called. `report` is now a function of its own --
+  the whole project in one call -- and a key here meaning something narrower
+  than the function of the same name is exactly the sort of near-collision a
+  reader has to hold two meanings for."
+  ([prj label] (source-origins prj (source-text prj label) label))
   ([prj text label]
-  (let [{:keys [forms scope report emit-for ns-name]} (analyse prj text label)
+  (let [{:keys [forms scope target-report emit-for ns-name]} (analyse prj text label)
         ctx (assoc (kin/context {} (first emit-for))
                    :vocabs (:vocabularies prj) :scope-syms scope
                    :targets (:targets prj)
-                   :vocab-order (:required report)
+                   :vocab-order (:required target-report)
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))
         failure (try (doseq [f forms] (kin/statement! ctx f)) nil
@@ -796,10 +810,10 @@
         local (into #{} (remove #(get scope %)) used)]
     {:label label
      :ns-name ns-name
-     :report report
+     :target-report target-report
      :emit-for emit-for
      :unconfigured (vec (remove (set (:target-order prj))
-                                (sort-by str (:targets report))))
+                                (sort-by str (:targets target-report))))
      :failure failure
      :by-vocab by-vocab
      :declared (into #{} (filter declared) local)
@@ -831,7 +845,7 @@
         ok (into {} (filter (comp :ok val)) analysed)
         extra (distinct (sort-by str (remove (set order)
                                              (mapcat (fn [[_ r]]
-                                                       (keys (:ruled-out (:report (:ok r)))))
+                                                       (keys (:ruled-out (:target-report (:ok r)))))
                                                      ok))))]
     {:order (vec (concat order extra))
      :count (count analysed)
@@ -845,7 +859,7 @@
                    :ruled-out
                    (group-by
                     (fn [label]
-                      (let [rep (:report (:ok (get analysed label)))]
+                      (let [rep (:target-report (:ok (get analysed label)))]
                         (or (seq (get (:ruled-out rep) t))
                             (when-not (some #{t} order)
                               ["this project has no target description for it"])
@@ -939,3 +953,105 @@
                             " is declared to take " (:expected p)))))
                {:problems ps})))
      prj)))
+
+;; ------------------------------------------------------------------ report
+;;
+;; THE WHOLE PROJECT IN ONE CALL. `source-origins` answers about ONE source
+;; and `targets-report` about one axis of all of them, and a person opening a
+;; project they have not read wants neither question -- they want the state,
+;; and they want the things that are wrong to be in one list rather than
+;; distributed over three calls they have to know to make.
+;;
+;; DATA, like everything else here. Printing is the caller's, which is what
+;; makes this usable from a build that reports to something other than a
+;; terminal.
+
+(defn- diagnostics
+  "Every finding in the project, flattened into one sorted vector.
+
+  ONE LIST, ACROSS KINDS. A symbol that comes from nowhere, a target two host
+  files disagree about and a call with the wrong argument count are found by
+  three different mechanisms and are the same thing to a reader: something to
+  go and look at. Keeping them apart in the output would make noticing them a
+  function of which key you thought to read.
+
+  Each carries `:issue`, and `:where` -- a source label, a namespace, or a
+  target -- so that a caller printing them needs to know nothing about which
+  mechanism produced which."
+  [{:keys [origins targets host usage]}]
+  (vec
+   (sort-by
+    (juxt (comp str :issue) (comp str :where) (comp str :detail))
+    (concat
+     (for [[label msg] (:errors targets)]
+       {:issue :unreadable :where label :detail msg})
+     (for [[label o] origins :when (:failure o)]
+       {:issue :render-failure :where label :detail (:failure o)})
+     (for [[label o] origins sym (sort-by str (:nowhere o))]
+       {:issue :nowhere :where label :detail sym})
+     (for [[label o] origins [sym shadows] (:shadowed o)]
+       {:issue :shadowed :where label :detail sym :shadows shadows})
+     (for [[label o] origins t (:unconfigured o)]
+       {:issue :unconfigured :where label :detail t})
+     (for [d host]
+       {:issue (keyword "host" (name (:issue d))) :where (:ns d)
+        :detail (:sym d) :finding d})
+     (for [p usage]
+       {:issue :usage-arity :where (:source p) :detail (:symbol p) :finding p})))))
+
+(defn report
+  "The state of the whole project, as DATA.
+
+      :sources       every label, sorted
+      :vocabularies  {name {:targets ... :forms n :tags n :names n}}
+      :origins       {label <source-origins>} -- everything `source-origins`
+                     answers, for every source
+      :targets       `targets-report`
+      :destinations  every `[target path]` this project would write
+      :host          {:targets [...] :namespaces [...]
+                      :disagreements [...] :arities {[ns sym] n}}
+      :usage         `usage-problems`
+      :diagnostics   every finding above, in ONE sorted vector
+
+  It is `source-origins` for every source PLUS the things that are only
+  visible across sources: which targets the host trees disagree about, and
+  which call sites contradict what they declared. Those two are what the host
+  annotations bought -- a second statement of the same fact, and something to
+  compare it with -- and they cannot be seen one source at a time.
+
+  NOTHING HERE THROWS for a project that is merely wrong. A source that will
+  not read is an `:unreadable` diagnostic and a render that dies is a
+  `:render-failure`, because this is the call you make when you already know
+  something is broken and want to see all of it at once. `check-usage` and
+  `kin.host/check-agreement` are the gates; this is the report."
+  ([prj] (report prj (sources prj)))
+  ([prj srcs]
+   (let [origins (into (sorted-map)
+                       (for [[label text] srcs
+                             :let [o (try (source-origins prj text label)
+                                          (catch #?(:clj Exception :default :default) _ nil))]
+                             :when o]
+                         [label o]))
+         targets (targets-report prj srcs)
+         ds (host/disagreements (:host prj))
+         usage (usage-problems prj srcs)]
+     {:sources (vec (sort (keys srcs)))
+      :vocabularies (into (sorted-map)
+                          (for [[nm v] (:vocabularies prj)]
+                            [nm {:targets (:targets v)
+                                 :forms (count (:forms v))
+                                 :tags (count (:tags v))
+                                 :names (count (:names v))}]))
+      :origins origins
+      :targets targets
+      :destinations (destinations prj srcs)
+      :host {:targets (vec (sort-by str (map :target (:host prj))))
+             :namespaces (vec (sort-by str (distinct (for [s (:host prj)
+                                                           e (:entries s)]
+                                                       (:ns e)))))
+             :disagreements ds
+             :arities (into (sorted-map-by (fn [a b] (compare (str a) (str b))))
+                            (host/arities (:host prj)))}
+      :usage usage
+      :diagnostics (diagnostics {:origins origins :targets targets
+                                 :host ds :usage usage})})))

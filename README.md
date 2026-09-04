@@ -354,8 +354,8 @@ There is no interpreter here and no `eval` seam.
 ```
 
 What comes out is an **ordinary vocabulary**: it passes `check-vocabulary`, a
-source requires it by name, `why` attributes symbols to it, and nothing
-downstream knows an annotation was involved. A namespace declared both
+source requires it by name, `source-origins` attributes symbols to it, and
+nothing downstream knows an annotation was involved. A namespace declared both
 by a host tree and by a hand-written vocabulary is refused — the annotations
 exist because the table drifted, so holding both is holding the drift.
 
@@ -410,29 +410,41 @@ The surface is three layers, and they differ in kind:
 | `emit!` | needs a **vfs** | writes each namespace's module, creating it — all through the user's implementation. |
 | *verify* | needs a **machine** | compiling with `rustc` and running it is process execution. **Not in kin**, and never should have been — it lives in the consumer's tree. |
 
-`why` and `targets-report` return **data**. Printing is the caller's, which is
-what makes them usable from something that is not a terminal.
+`source-origins`, `targets-report` and `report` return **data**. Printing is
+the caller's, which is what makes them usable from something that is not a
+terminal.
 
 ## 9. When something is wrong
 
-**`why`** is the one to reach for. It prints which targets a source
-generates for and how that was computed, which vocabulary contributed each
-symbol, what an earlier require shadowed, and — the bucket that justifies the
-command — **`FROM NOWHERE`**: a symbol in no vocabulary, declared by nothing
-and bound by nothing, which the target's local namer will spell and emit as
-written.
+**`report`** is the one to reach for: the state of the whole project in one
+call, and every finding in one sorted `:diagnostics` vector — a symbol from
+nowhere, a render that died, a target two host files disagree about, a call
+with the wrong argument count. They are found by four different mechanisms and
+are the same thing to a reader: something to go and look at.
+
+Under it, **`source-origins`** answers about one source. It says which targets
+that source generates for and how that was computed, which vocabulary
+contributed each symbol, what an earlier require shadowed, and — the bucket
+that justifies the whole report — **`FROM NOWHERE`**: a symbol in no
+vocabulary, declared by nothing and bound by nothing, which the target's local
+namer will spell and emit as written.
+
+It used to be called `why`, which named only that a question was asked.
 
 That is not hypothetical. A constant missing from a name table passed through
 verbatim and emitted an identifier C# does not have; the CLR failed to compile
 for the whole of the work that followed and every gate stayed green.
-`generate` emits it happily. `why` reports:
+`generate` emits it happily. `source-origins` reports:
 
 ```
     FROM NOWHERE               ls-thunk
 ```
 
-A render that throws still prints the table, from however far it got, because
-`why` is the command you run when generation is already broken.
+A render that throws still answers, from however far it got, because this is
+the report you reach for when generation is already broken. `report` never
+throws for a project that is merely wrong, for the same reason:
+`check-usage` and `kin.host/check-agreement` are the gates, and this is the
+report.
 
 ## The rule that governs the output
 

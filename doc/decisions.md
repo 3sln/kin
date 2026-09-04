@@ -27,6 +27,7 @@ lost is still the argument a future reader will re-invent.
 | K | where a host annotation's NAME lives | **DECIDED** — in the marker, never in the payload |
 | L | does kin tell the target which marker it read? | **DECIDED** — no; the answer is checked against the marker instead |
 | M | is the call-site arity check part of `generate`? | **DECIDED** — no; it is a gate a build calls |
+| N | what `why` should be called | **DECIDED** — `source-origins`, and `:report` becomes `:target-report` |
 
 ---
 
@@ -668,6 +669,36 @@ original drift that no cross-target comparison can reach: two runtimes can
 agree perfectly that `vec-nth` takes two arguments and a source can still call
 it with three. The cross-target check compares the runtimes with each other;
 this compares them with the code that uses them.
+
+## N — What `why` should be called
+
+### DECIDED. `source-origins`. And its `:report` key becomes `:target-report`.
+
+`why` named only that a question was asked, so every mention of it in a doc
+had to say what it did, and `(why prj "champ.kin")` at a call site said
+nothing at all. The function answers where each symbol in a source
+ORIGINATES.
+
+Three candidates:
+
+* **`source-origins`** — names the subject and the answer, and joins the
+  `source-label` / `source-text` / `source-labels` family that already reads
+  as *this question, of that source*.
+* **`provenance`** — the right word, and already this project's word for
+  something else: `kin.cljc` uses it for a promise node's origin. Reusing it
+  one layer up for a different granularity is exactly the near-collision the
+  `:report` key had to be moved for.
+* **`explain-source`** — names an action and implies prose. It returns data.
+
+The result's `:report` key held `kin/target-report`'s answer, and `report` is
+now a function of its own -- the whole project in one call. A key meaning
+something narrower than the function of the same name is two meanings a reader
+has to hold, so the key is `:target-report`, named for what produces it.
+`analyse` was renamed with it, so the two agree.
+
+`targets-report` keeps its name and is now one key of `report`. That pair is
+not confusing in the way the other was: `report` is the whole, and
+`targets-report` is the axis it contains.
 
 ---
 

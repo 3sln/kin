@@ -457,6 +457,22 @@
          " declared to take 2")
     (threw #(kp/check-usage prj sources)))
 
+;; ------------------------------------------------------------- the report
+;;
+;; `report` is Piece 2's, and it is here as well as in `test/diagnostics.clj`
+;; because the two findings above are the ones only a host tree can produce:
+;; a person asking "what is the state of this project" has to be shown them
+;; without having to know that `kin.host` exists.
+(let [prj' (assoc prj :sources {:vfs (vfs/memory-vfs sources) :match "*.kin"})
+      r (kp/report prj')]
+  (is "report: the host's namespaces and agreed arities are in it"
+      [['demo.rt] {['demo.rt 'vec-nth] 2}]
+      [(:namespaces (:host r)) (:arities (:host r))])
+  (is "report: and the bad call is one of the diagnostics"
+      [{:issue :usage-arity :where "bad.kin" :detail 'vec-nth}]
+      (mapv #(select-keys % [:issue :where :detail])
+            (filter #(= :usage-arity (:issue %)) (:diagnostics r)))))
+
 (println)
 (if (zero? @failures)
   (println "host: annotations read where they sit, interpreted by the targets, checked against each other and against the call sites\n")

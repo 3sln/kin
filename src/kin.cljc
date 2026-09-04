@@ -417,9 +417,9 @@
 
   Shadowing is not an error and not a warning, because it is the mechanism.
   It is RECORDED -- in this map's metadata, under `:kin/shadowed` -- and
-  `kin why` prints it, so the effect is visible rather than inferred. An
-  override nobody can see is indistinguishable from a bug, which is how the
-  last-wins behaviour survived this long."
+  `kin.project/source-origins` reports it, so the effect is visible rather
+  than inferred. An override nobody can see is indistinguishable from a bug,
+  which is how the last-wins behaviour survived this long."
   [ns-form vocabs]
   (let [reqs (->> (rest ns-form)
                   (filter (fn [f] (and (seq? f) (= :require (first f)))))
@@ -583,9 +583,9 @@
 (defn shadowed
   "What each symbol in a require scope shadows: `{sym [[vocab k] ...]}`.
 
-  Written by `require-scope` and read by `kin why`. Empty for a source that
-  requires one vocabulary, which is every source in the tree this was built
-  against -- so first-wins changed nothing there, and the check that says so
+  Written by `require-scope` and read by `kin.project/source-origins`. Empty
+  for a source that requires one vocabulary, which is every source in the tree
+  this was built against -- so first-wins changed nothing there, and the check that says so
   is `bin/check-kin` reporting byte-identical output."
   [scope]
   (:kin/shadowed (meta scope) {}))
