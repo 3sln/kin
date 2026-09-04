@@ -339,9 +339,31 @@
 ;; what makes it necessary. Three files state the same fact three ways, and
 ;; nothing but a comparison holds them together.
 
-(defn- by-key [scans]
+(defn- by-key
+  "Every entry across every scan, as `{[ns kind sym] {target entry}}`.
+
+  TWO ANNOTATIONS FOR ONE SYMBOL IN ONE TARGET ARE REFUSED. The obvious
+  implementation lets the second overwrite the first, and that is the same
+  silence this whole namespace exists to remove one level along: two host
+  files both claiming `vec-nth` for Java is somebody having moved a function
+  and annotated it in its new home without deleting the old annotation, and
+  the loser is chosen by the vfs listing order. Both sites are named, because
+  which one is stale is the reader's question and not kin's."
+  [scans]
   (reduce (fn [m {:keys [target entries]}]
-            (reduce (fn [m e] (assoc-in m [[(:ns e) (:kind e) (:sym e)] target] e))
+            (reduce (fn [m e]
+                      (let [k [(:ns e) (:kind e) (:sym e)]]
+                        (when-let [prior (get-in m [k target])]
+                          (fail (:path e) (:line e)
+                                (str "`" (:sym e) "` is already declared for "
+                                     (name target) " at " (:path prior) ":"
+                                     (:line prior) ". One target declares a"
+                                     " symbol once -- with two, which one wins"
+                                     " is the order the files happened to be"
+                                     " listed in.")
+                                {:symbol (:sym e) :kind (:kind e) :namespace (:ns e)
+                                 :target target :prior (select-keys prior [:path :line])}))
+                        (assoc-in m [k target] e)))
                     m entries))
           {} scans))
 

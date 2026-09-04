@@ -25,7 +25,8 @@
 ;;      variadic -- with no evaluation and no reflection
 ;;   8. a form one target declares and another does not is reported, with the
 ;;      file and line of every site that has one
-;;   9. two payloads stating different arities are reported
+;;   9. two payloads stating different arities are reported, and two
+;;      annotations for one symbol in one target are refused naming both
 ;;  10. THE PAYLOAD IS THE LINK FN. A scanned annotation ends up as the
 ;;      vocabulary's `:forms` entry and generates the call, per target,
 ;;      through the path a hand-written vocabulary takes.
@@ -195,6 +196,15 @@
   (is "9. two payloads stating different arities are reported, with both"
       [{:issue :arity :sym 'vec-nth :arities {:java #{3} :rust #{2}}}]
       (mapv #(select-keys % [:issue :sym :arities]) ds)))
+
+(is "8. two annotations for one symbol in one target are refused, naming both"
+    (str "kin.host: b.src:2: `vec-nth` is already declared for java at"
+         " a.src:2. One target declares a symbol once -- with two, which one"
+         " wins is the order the files happened to be listed in.")
+    (threw #(host/disagreements
+             [(scan-of :java "//"
+                       {"a.src" "// @kin:ns: demo.rt\n// @kin:link:form: vec-nth (fn [c f])\n"
+                        "b.src" "// @kin:ns: demo.rt\n// @kin:link:form: vec-nth (fn [c f])\n"})])))
 
 (is "9. a payload stating no arity does not disagree with one that does"
     [] (host/disagreements [(annotate :java 'vec-nth "(fn [ctx a b] 1)")
