@@ -357,7 +357,7 @@
                ;; says the thing and each target spends what it must.
                (str/join ", " (cons* (when recv (if (:mut (meta recv)) "&mut self" "&self"))
                                      (mapv (fn [[p tag]] (str (when (:mut (meta p)) "mut ")
-                                                              (snake (str p)) ": " (ty tag))) ps)))
+                                                              (kin/local-name ctx p) ": " (ty tag))) ps)))
                ")"
                (cond
                  (and ret throws?) (str " -> Result<" (ty ret) ", String>")
@@ -381,7 +381,7 @@
                (if ret (ty ret) "void") " " (target-name ctx nm) "("
                (str/join ", " (cons* (when (and recv (not on-inst?))
                                        (str (ty (:tag (meta recv))) " " recv))
-                                     (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n")
+                                     (mapv (fn [[p tag]] (str (ty tag) " " (kin/local-name ctx p))) ps))) ") {\n")
         :csharp (kin/emit!
                  ctx (kin/indent-of ctx)
                  ;; C# class members default to PRIVATE where Java defaults to
@@ -392,7 +392,7 @@
                  (if ret (ty ret) "void") " " (target-name ctx nm) "("
                  (str/join ", " (cons* (when (and recv (not on-inst?))
                                          (str (ty (:tag (meta recv))) " " recv))
-                                       (mapv (fn [[p tag]] (str (ty tag) " " (camel (str p)))) ps))) ") {\n"))
+                                       (mapv (fn [[p tag]] (str (ty tag) " " (kin/local-name ctx p))) ps))) ") {\n"))
       (let [wrap? (and unchecked? (= :csharp (t ctx)))
             ;; A FRESH TAG TABLE PER FUNCTION, seeded with the parameters.
             ;; Fresh because a table that outlived its function would let a
