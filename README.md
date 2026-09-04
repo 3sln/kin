@@ -292,7 +292,79 @@ or nothing. Three phases: generate into memory, stage every destination, then
 write, restoring the originals if a write fails partway. A partial tree is a
 state nobody designed and no gate describes.
 
-## 7. kin is a library, not a command
+## 7. The host source declares its own linkage
+
+A vocabulary entry for a host function — *this kin name calls that method,
+spelled thus per target* — sits far from the code it describes, so it drifts,
+and it drifts **silently**: an entry is only exercised once some kin source
+happens to call it, which may be many commits after the host function changed
+underneath it. Two real instances in the one project using kin: an entry that
+declared arity 2 for several commits after the function grew a default
+argument and became 3, and one that emitted an unqualified `Seqs.seq(...)`,
+which binds to the wrong class once a *generated* class named `Seqs` exists in
+the same package.
+
+So the host file says it, next to the thing it says it about. Comment syntax
+is the host language's; the marker is the same in all of them.
+
+```java
+// @kin:ns: flint.impl.rt
+
+// @kin:link:form: vec-nth
+//   (fn [ctx form]
+//     (kin/emit! ctx (str "Vecs.nth(" (kin/render ctx (second form)) ")")))
+public static long nth(Rt rt, long v, long i, long dflt) { ... }
+```
+
+**The payload is a link fn.** Not a template, not a description of one, not a
+new dispatch mechanism — it has the same signature and the same job as one
+written into a vocabulary by hand, and `kin.host/vocabularies` puts it in
+exactly that slot. What comes out is an ordinary vocabulary: it passes
+`check-vocabulary`, a source requires it by name, `why` reports it, and
+nothing downstream knows an annotation was involved.
+
+```clojure
+(def scans [(host/scan {:vfs (vfs/disk-vfs "runtime/java") :match "*.java"
+                        :target :java :comment "//"})
+            (host/scan {:vfs (vfs/disk-vfs "runtime/rust") :match "*.rs"
+                        :target :rust :comment "//"})])
+
+(host/check-agreement scans)              ; a gate, over READ FORMS
+(host/vocabularies scans)                 ; {ns-sym vocabulary}
+```
+
+**One annotation per target** — the Java file declares Java's, the Rust file
+Rust's — so kin can check they agree. `disagreements` returns data and
+`check-agreement` throws; both compare the forms **as read**, and neither
+invokes anything, so the check runs over a tree that does not build. Arity
+needs no reflection either: `(fn [ctx a b] ...)` states its binding vector, so
+the arity is a count.
+
+The check that bites is `:missing` — a host function ported to two of three
+runtimes with the third's annotation never written. It is worth being plain
+that the *arity* half is nearly vacuous for a link fn written the ordinary
+way, since `(fn [ctx form] ...)` is arity 2 on every target. What defends
+against the drift that motivated all this is not the check: it is that the
+annotation sits next to the function, so growing the parameter list and
+leaving the annotation alone is an edit made while looking at both.
+
+A payload is read with the same reader kin reads its sources with, one value
+at a time, so a multi-line payload needs nothing new — only the comment prefix
+stripped off each continuation line, which is **configuration** (`//`, `;;`,
+`#`, `--`) rather than something guessed from a file extension. An
+unterminated payload, a misspelt marker, and an annotation with no `@kin:ns:`
+above it are each an error naming the file and the line. A misspelt marker is
+*refused* rather than skipped, because a misspelt annotation and no annotation
+at all look identical from the far end.
+
+**Evaluation is a stopgap, behind one seam.** `kin.host/evaluate` turns the
+read form into a callable, and it goes through SCI today (under babashka
+`eval` *is* SCI — the value it answers for a `(fn ...)` is an
+`sci.impl.fns$fun`). Once flint can interpret its own syntax, flint becomes
+the interpreter and that one function's body is what changes. Pass
+`:evaluate` to `vocabularies` to supply your own now.
+
+## 8. kin is a library, not a command
 
 **There is no `kin` executable.** The script belongs to the project using it,
 because what a project wants from a generator — where its sources live, how
@@ -311,7 +383,7 @@ The surface is three layers, and they differ in kind:
 `why` and `targets-report` return **data**. Printing is the caller's, which is
 what makes them usable from something that is not a terminal.
 
-## 8. When something is wrong
+## 9. When something is wrong
 
 **`why`** is the one to reach for. It prints which targets a source
 generates for and how that was computed, which vocabulary contributed each

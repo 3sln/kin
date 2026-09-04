@@ -597,6 +597,63 @@ entry declaring its imports as data, which `examples/go` does -- is the
 better answer for a vocabulary being written now; retrofitting it means
 annotating several hundred existing entries, and this needed none.
 
+## K — The annotation scanner: four choices and one stopgap
+
+Building `kin.host` took four decisions the brief did not settle, and one that
+it settled by naming it a stopgap.
+
+**The marker is `@kin:link:`, and the overload is not one.** kin already has a
+LINK PHASE, so the spelling collides. It collides on purpose: the phase
+resolves a reference *to* an implementation, and an annotation is an
+implementation reaching out of the host source to be resolved to. `@kin:extern:`
+was the alternative and says less — `extern` names where the thing lives,
+`link` names what the annotation is *for*.
+
+**Which target a file speaks is configuration, not an annotation.** A
+`@kin:target:` marker in the file would be a second place for the same fact to
+be wrong, and the caller already knows: it chose the glob and the comment
+prefix. So `scan` takes `:target` and refuses a scan without one.
+
+**A marker kin does not recognise is refused, not skipped.** This is the one
+judgement call with a cost — `@kin:` in prose in a doc comment is now an
+error. It is worth it, because the whole feature exists to remove a failure
+that is invisible from the far end, and a misspelt annotation and no
+annotation at all look identical from there.
+
+**A tag's payload is this target's type, and a name's is this target's
+spelling** — narrower than what either can hold in a hand-written vocabulary.
+`check-vocabulary` already knows a tag has a `:types` keyed by target and a
+name a spelling per target; it refuses a vocabulary missing either. So
+assembling exactly those from per-target files asks kin to know nothing new,
+whereas merging arbitrary per-target maps would be kin reading inside a tag,
+which it does not do. A tag that carries *more* than its type — a dispatch
+table a form reads — is not a fact about one host file anyway: every target's
+form has to see the same table, so it belongs in a vocabulary where they all
+can.
+
+**Evaluation is SCI and that is temporary**, which the brief said and which
+the code says in one place. `kin.host/evaluate` is the whole seam. Under
+babashka `clojure.core/eval` *is* SCI, measured rather than assumed: the value
+it answers for `(fn [ctx form] ...)` is an `sci.impl.fns$fun`. Two properties
+were measured because they constrain what an annotation may say — a
+fully-qualified name resolves (`kin/emit!` and `kin.lang/call` both do, from a
+caller that required neither) and an alias does not (`(lang/call ...)` throws
+`Could not resolve symbol`). Neither is a quirk to design around; both are
+what any evaluator with no ambient namespace will do, flint's included.
+
+### What the agreement check does not catch
+
+The arity half is nearly vacuous for a link fn written the ordinary way:
+`(fn [ctx form] ...)` is arity 2 on every target, so every target agrees.
+It bites only where the payloads' shapes genuinely differ.
+
+What the check earns its place on is `:missing` — a host function ported to
+two of three runtimes with the third's annotation never written. And what
+actually defends against the arity drift that motivated the feature is not a
+check at all: it is that the annotation sits next to the function, so growing
+the parameter list and leaving the annotation alone is an edit somebody makes
+while looking at both.
+
 ## What kin owes, after both corrections
 
 The corrections narrow kin's job, which is the point of them. On tags, all of
