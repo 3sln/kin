@@ -21,6 +21,18 @@
     :path        (fn [ns] -> String or nil) namespace -> file, under :dest
     :indent      (fn [ns] -> int) how deep the region sits in its file
                  -- PROVISIONAL, see below
+    :link        (fn [link-data vfs file-path]
+                   -> {:link-fn ... :arity ... ...}) what a `@kin:link:`
+                 annotation in this language's host source MEANS
+
+  `:link` IS WHERE THE PAYLOAD IS INTERPRETED, and kin ships none -- that is
+  the point rather than an omission. A host annotation's payload is opaque
+  EDN whose format the target invented, so the target is the only thing that
+  can read one; kin knows the marker and the name, hands the data over, and
+  uses only what comes back. What comes back is a `:link-fn` (or, for a tag,
+  a `:type`), an optional `:arity`, and whatever else that target can
+  usefully say -- and THAT is what the cross-target and call-site checks are
+  built from. See `kin.host`.
 
   DESTINATION IS COMPUTED, NOT LISTED. `:dest` and `:path` are how a target
   says where a namespace's generated code goes, and the pair is deterministic:

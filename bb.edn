@@ -6,6 +6,6 @@
 ;; break the claim.
 {:paths ["src"]
  :tasks {test {:doc "Run every test."
-               :task (doseq [t ["tags" "emit" "diagnostics" "exports" "promises" "contexts" "link"]]
+               :task (doseq [t ["tags" "emit" "diagnostics" "exports" "promises" "contexts" "link" "host"]]
                        (let [r (shell {:continue true} "bb" (str "test/" t ".clj"))]
                          (when-not (zero? (:exit r)) (System/exit 1))))}}}

@@ -292,7 +292,109 @@ or nothing. Three phases: generate into memory, stage every destination, then
 write, restoring the originals if a write fails partway. A partial tree is a
 state nobody designed and no gate describes.
 
-## 7. kin is a library, not a command
+## 7. The host source declares its own linkage
+
+A vocabulary entry for a host function — *this kin name calls that method,
+spelled thus per target* — sits far from the code it describes, so it drifts,
+and it drifts **silently**: an entry is only exercised once some kin source
+happens to call it, which may be many commits after the host function changed
+underneath it. Two real instances in the one project using kin: an entry that
+declared arity 2 for several commits after the function grew a default
+argument and became 3, and one that emitted an unqualified `Seqs.seq(...)`,
+which binds to the wrong class once a *generated* class named `Seqs` exists in
+the same package.
+
+So the host file says it, next to the thing it says it about. Comment syntax
+is the host language's; the marker is the same in all of them.
+
+```java
+// @kin:link:ns: com._3sln.flint.kgen
+
+// @kin:link:form:vec-nth: {:kind :method
+//                          :args [{:type :int :name a}
+//                                 {:type :int :name b}]}
+public static long nth(Rt rt, long v, int i, long dflt) { ... }
+```
+
+**kin reads the marker and stops.** That this is a `form` or a `tag`, its
+name, and the namespace are kin's business, because they correspond exactly to
+a vocabulary's own structure — `:forms`, `:tags`, and the symbols those are
+keyed by. The map after the marker is **opaque EDN**: kin does not know what
+`:kind` or `:args` mean, does not validate them and does not count them. The
+name lives *in the marker* for that reason — were it a key in the payload, kin
+would have to reach into the payload to find it, and the line would be crossed
+by its first act.
+
+**A target interprets, and kin consumes only the answer.** A target gains a
+`:link`:
+
+```clojure
+{:key  :java
+ :link (fn [link-data vfs file-path]
+         {:link-fn (fn [ctx form] ...)   ; the kind kin already installs
+          :arity   3                     ; how many arguments a CALL takes
+          ...})}                         ; whatever else it can usefully say
+```
+
+It is handed the vfs and the path as well as the data, because the file is
+where the rest of the truth is. **Nothing is evaluated**: the payload is data
+and the target is ordinary project code, already loaded, already a function.
+There is no interpreter here and no `eval` seam.
+
+```clojure
+(def scans
+  (host/interpret targets
+                  [(host/scan {:vfs (vfs/disk-vfs "runtime/java") :match "*.java"
+                               :target :java :comment "//"})
+                   (host/scan {:vfs (vfs/disk-vfs "runtime/rust") :match "*.rs"
+                               :target :rust :comment "//"})]))
+
+(host/check-agreement scans)                 ; the targets agree — a gate
+(kp/check-usage (kp/project {... :host scans}))   ; and the call sites match
+```
+
+What comes out is an **ordinary vocabulary**: it passes `check-vocabulary`, a
+source requires it by name, `why` attributes symbols to it, and nothing
+downstream knows an annotation was involved. A namespace declared both
+by a host tree and by a hand-written vocabulary is refused — the annotations
+exist because the table drifted, so holding both is holding the drift.
+
+The returned metadata — never the payload — is what the two checks are built
+from:
+
+* **`disagreements`** compares the targets against *each other*: a form some
+  declare and others do not, and two that state different arities. The
+  `:missing` half is the one that bites — a host function ported to two of
+  three runtimes with the third's annotation never written. The arity half is
+  *not* vacuous, and an earlier attempt at this made it so by computing arity
+  from the payload rather than asking the target; every target's payload was a
+  `(fn [ctx form] ...)`, so the check compared 2 with 2 forever.
+* **`usage-problems`** turns the agreed arity on the *call sites*. Two
+  runtimes can agree perfectly that `vec-nth` takes two arguments and a source
+  can still call it with three; until now the first thing to notice was the
+  host compiler, or — on the target whose call happened to still type-check —
+  nothing at all. It is a syntactic walk, so it is a **gate a build calls**
+  rather than something `generate` throws from: a heuristic that cannot see a
+  shadowing local makes a good report and a bad gate.
+
+A payload is read one value at a time, so a multi-line one needs no new
+reader — only the comment prefix stripped off each continuation line, which is
+**configuration** (`//`, `;;`, `#`, `--`) rather than something guessed from a
+file extension. An unterminated payload, a misspelt marker, an annotation with
+no `@kin:link:ns:` above it, and two annotations for one symbol in one target
+are each an error naming the file and the line. A misspelt marker is *refused*
+rather than skipped, because a misspelt annotation and no annotation at all
+look identical from the far end.
+
+The payload is plain EDN, and `{:type :int :name a}` rather than `^:int a` is
+a deliberate consequence. Measured under bb: `clojure.edn/read` *does* attach
+metadata, but metadata takes no part in `=` and `pr-str` does not print it —
+so `{:args [^:int a]}` and `{:args [a]}` are equal, print identically, and
+survive a print-and-read round trip as the same value. A payload whose meaning
+lives in metadata is one that every report, every diff and every test agrees
+is something it is not.
+
+## 8. kin is a library, not a command
 
 **There is no `kin` executable.** The script belongs to the project using it,
 because what a project wants from a generator — where its sources live, how
@@ -311,7 +413,7 @@ The surface is three layers, and they differ in kind:
 `why` and `targets-report` return **data**. Printing is the caller's, which is
 what makes them usable from something that is not a terminal.
 
-## 8. When something is wrong
+## 9. When something is wrong
 
 **`why`** is the one to reach for. It prints which targets a source
 generates for and how that was computed, which vocabulary contributed each

@@ -30,7 +30,8 @@
       {:vocabularies {'my.vocab {...}}       ; name -> vocabulary
        :targets      {:rust {...}}           ; key  -> target descriptor
        :target-order [:rust :java :csharp]   ; how a report lists them
-       :sources      {:vfs ... :match `*.kin`}}
+       :sources      {:vfs ... :match `*.kin`}
+       :host         [<interpreted scan> ...]}   ; see `kin.host`
 
   TWO KINDS OF VFS, doing different jobs. The SOURCE vfs scans and reads --
   it is the only one that ever lists. Each TARGET's vfs reads and writes its
@@ -38,10 +39,18 @@
   and `targets-report` from commands that glob a real tree into functions
   over a config, which is the only reason they can be tested at all.
 
+  `:host` is what a host tree declared about itself, read by `kin.host` and
+  interpreted by the targets. Its vocabularies join `:vocabularies` and are
+  indistinguishable from hand-written ones from there on; what it keeps
+  separately is the METADATA the targets answered, which is what
+  `kin.host/disagreements` cross-checks the targets with and what
+  `usage-problems` checks the call sites against.
+
   `project` builds one from vocabularies you already have. `load-project`
   is the convenience that resolves them from namespace names, and it is the
   only thing here that needs a host with `require` in it."
   (:require [kin]
+            [kin.host :as host]
             [kin.vfs :as vfs]
             [clojure.edn :as edn]
             [clojure.string :as str]))
@@ -53,14 +62,35 @@
 
   Pure, and the reason `generate` can be. Nothing here loads a namespace or
   opens a file; a caller that has its vocabularies as values -- a test, a
-  browser, a build that already required them -- never touches the loader."
-  [{:keys [vocabularies targets target-order sources]}]
+  browser, a build that already required them -- never touches the loader.
+
+  `:host` is a vector of INTERPRETED `kin.host` scans, and what they declare
+  becomes ordinary vocabularies here. A namespace declared BOTH by a host tree
+  and by hand is REFUSED naming it, rather than one of them silently winning:
+  a host annotation exists to stop a hand-written table from drifting away
+  from the code, and a project holding both is holding the drift it was meant
+  to remove. Deleting the table is the whole point of writing the
+  annotations."
+  [{:keys [vocabularies targets target-order sources host]}]
   (let [vocabs (into {} (map (fn [v] [(:namespace (kin/check-vocabulary v)) v]))
-                     vocabularies)]
-    {:vocabularies vocabs
+                     vocabularies)
+        from-host (if (seq host) (host/vocabularies host) {})
+        clash (filterv vocabs (sort-by str (keys from-host)))]
+    (when (seq clash)
+      (throw (ex-info
+              (str "kin: " (str/join ", " (map str clash))
+                   (if (= 1 (count clash))
+                     " is declared both by a host tree's annotations and by a hand-written vocabulary."
+                     " are each declared both by a host tree's annotations and by a hand-written vocabulary.")
+                   " Only one of them can be the statement of what the host"
+                   " exposes, and the annotations exist because the"
+                   " hand-written one drifted.")
+              {:namespaces clash})))
+    {:vocabularies (merge from-host vocabs)
      :targets (or targets {})
      :target-order (vec (or target-order (keys targets)))
-     :sources sources}))
+     :sources sources
+     :host (vec host)}))
 
 #?(:clj
    (defn load-vocabulary
@@ -93,11 +123,12 @@
 
      The one function here that needs a host with `require` in it, kept apart
      from `project` for that reason."
-     [{:keys [vocabularies targets target-order sources]}]
+     [{:keys [vocabularies targets target-order sources host]}]
      (project {:vocabularies (mapv load-vocabulary vocabularies)
                :targets targets
                :target-order target-order
-               :sources sources})))
+               :sources sources
+               :host host})))
 
 ;; ------------------------------------------------------------- the sources
 ;;
@@ -820,3 +851,91 @@
                               ["this project has no target description for it"])
                             ["?"])))
                     out)}])))})))
+
+;; ------------------------------------------------------------ host usage
+;;
+;; WHAT THE TARGETS ANSWERED, TURNED ON THE CALL SITES. `kin.host/arities`
+;; leaves that namespace as `{[ns sym] n}` -- a count kin obtained without ever
+;; reading a Java annotation, because a target read it and answered. Here it
+;; meets the only thing that can contradict it: a kin source calling the form.
+;;
+;; This is the half of the original drift the cross-target check cannot reach.
+;; Two runtimes can agree perfectly that `vec-nth` takes three arguments and a
+;; source can still call it with two, and until now the first thing to notice
+;; was the host compiler -- or, for the target whose call happened to still
+;; type-check, nothing at all.
+
+(defn usage-problems
+  "Calls in kin sources whose argument count contradicts what the host
+  annotations declare, as DATA.
+
+      {:issue :arity :source \"champ.kin\" :namespace 'demo.rt :symbol 'vec-nth
+       :as-written 'nth :expected 3 :actual 2 :form (nth v i)}
+
+  `:symbol` is the name the host declared and `:as-written` is what the source
+  called it -- an alias or a `:refer` makes those different, and a message
+  saying only the first sends the reader looking for a word that is not in the
+  file.
+
+  A SYNTACTIC WALK, and deliberately not part of `generate`. It finds a head
+  symbol that resolves through the source's require scope to an annotated
+  form, and it cannot see that a local of the same name shadows it -- the same
+  limit `bound-names` has, for the same reason. A heuristic makes a good
+  report and a bad gate, so this is one a build calls next to
+  `kin.host/check-agreement` rather than something a render throws from. A
+  false positive should cost a reader a second, not a build."
+  ([prj] (usage-problems prj (sources prj)))
+  ([prj srcs]
+   (let [arities (host/arities (:host prj))]
+     (if (empty? arities)
+       []
+       (vec
+        (sort-by
+         (juxt :source (comp str :symbol) :actual)
+         (for [[label text] srcs
+               :let [a (try (analyse prj text label)
+                            (catch #?(:clj Exception :default :default) _ nil))]
+               :when a
+               :let [scope (:scope a)
+                     calls (atom [])]
+               :let [_ ((fn walk [f]
+                          (when (seq? f)
+                            (when-let [[v sym] (and (symbol? (first f))
+                                                    (get scope (first f)))]
+                              (when-let [n (get arities [v sym])]
+                                (when (not= n (dec (count f)))
+                                  (swap! calls conj
+                                         {:issue :arity :source label
+                                          :namespace v :symbol sym
+                                          :as-written (first f)
+                                          :expected n :actual (dec (count f))
+                                          :form f}))))
+                            (doseq [x f] (walk x))))
+                        (cons 'do (:forms a)))]
+               problem @calls]
+           problem)))))))
+
+(defn check-usage
+  "Answer `prj` if every call to an annotated host form has the declared
+  number of arguments; throw naming each that does not.
+
+  The gate half of `usage-problems`, the same pair of shapes
+  `kin.host/check-agreement` and `disagreements` are."
+  ([prj] (check-usage prj (sources prj)))
+  ([prj srcs]
+   (let [ps (usage-problems prj srcs)]
+     (when (seq ps)
+       (throw (ex-info
+               (str "kin: " (count ps)
+                    (if (= 1 (count ps)) " call does not match"
+                        " calls do not match")
+                    " what the host declares.\n"
+                    (str/join
+                     "\n"
+                     (for [p ps]
+                       (str "  " (:source p) ": (" (:as-written p) " ...) takes "
+                            (:actual p) " argument" (when (not= 1 (:actual p)) "s")
+                            ", and " (:namespace p) "/" (:symbol p)
+                            " is declared to take " (:expected p)))))
+               {:problems ps})))
+     prj)))

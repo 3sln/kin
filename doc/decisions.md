@@ -24,6 +24,9 @@ lost is still the argument a future reader will re-invent.
 | — | what `declare` means with no runtime | **ANSWERED by the promise model** — a bare declare defers |
 | H | provenance format for an unsettled node | **DECIDED** — form, label, deps by kind, and which failure |
 | I | layout, and who writes the consuming lines | **DECIDED** — `kingen/*`; kin reports the lines, never writes them |
+| K | where a host annotation's NAME lives | **DECIDED** — in the marker, never in the payload |
+| L | does kin tell the target which marker it read? | **DECIDED** — no; the answer is checked against the marker instead |
+| M | is the call-site arity check part of `generate`? | **DECIDED** — no; it is a gate a build calls |
 
 ---
 
@@ -596,6 +599,77 @@ sources rather than a list anyone maintains. `need!` -- every vocabulary
 entry declaring its imports as data, which `examples/go` does -- is the
 better answer for a vocabulary being written now; retrofitting it means
 annotating several hundred existing entries, and this needed none.
+
+## K — Where a host annotation's name lives
+
+### DECIDED. In the marker: `@kin:link:form:vec-nth:`.
+
+kin is allowed to know three things about a host annotation -- that it is a
+form or a tag, what it is called, and which namespace it declares into --
+because those three are a vocabulary's own structure. It is allowed to know
+nothing about the payload.
+
+The first attempt put the name in the payload's first position, `@kin:link:form:
+vec-nth (fn ...)`, and read two values. That is a smaller thing than it looks:
+kin then reaches INTO the payload to find the name, and the line the whole
+namespace exists to hold is crossed by its first act. Putting the name in the
+marker makes the boundary structural rather than a rule somebody has to keep
+-- there is exactly one call site that touches the payload, `interpret`, and it
+hands it to the target unread.
+
+The cost is a marker grammar with a variable segment, which needs a parse
+rather than a set membership test. The whole of that parse is: take the
+non-whitespace run after `@kin:link:`, require it to end in a colon, split. A
+run that does not fit is REFUSED naming the three shapes kin reads, which
+folds four mistakes -- a misspelt kind, a form that forgot to name itself, an
+`ns` that named something, and a missing colon -- into one message.
+
+## L — Does kin tell the target which marker it read?
+
+### DECIDED. No. The answer is checked against the marker instead.
+
+The hook's signature is `(link-data vfs file-path)`. A target handling both
+forms and tags therefore learns which it is being asked about from its OWN
+payload -- which is where a `:kind` belongs, if it wants one, because the
+payload's format is the target's invention.
+
+The alternative was a fourth argument naming the marker. It was rejected
+because it would be kin telling a target something the target already knows,
+and because the useful half of it is available anyway: kin CHECKS the answer
+against the marker, so a form has to come back with a `:link-fn` and a tag
+with a `:type`, and a target that mixed the two up is told at the file and
+line. That is the same information arriving in the direction that catches a
+mistake rather than the direction that prevents kin having to think.
+
+`:arity` is kin's key, not the target's, so kin says what may be in it: a
+non-negative count, or the key omitted. A target that will not state one is
+not checked against one, and `arities` leaves out a form the targets disagree
+about entirely -- a usage check that picked a winner from two contradictory
+declarations would be checking against a coin toss.
+
+## M — Is the call-site arity check part of `generate`?
+
+### DECIDED. No. It is a gate a build calls, next to `check-agreement`.
+
+`usage-problems` is a SYNTACTIC walk. It finds a head symbol that resolves
+through the source's require scope to an annotated form and compares the
+argument count; it cannot see that a local of the same name shadows it, which
+is the same limit `bound-names` has and for the same reason.
+
+A heuristic makes a good report and a bad gate. Wiring it into `generate`
+would mean a false positive stops a build for a source that is correct, and
+the class of thing that produces a false positive here -- a local shadowing an
+imported name -- is legal and occasionally deliberate. So it returns data,
+`check-usage` throws over that data, `report` includes it, and a project
+decides for itself. `generate` stays pure and stays about generating.
+
+What it catches is worth being plain about, because it is the half of the
+original drift that no cross-target comparison can reach: two runtimes can
+agree perfectly that `vec-nth` takes two arguments and a source can still call
+it with three. The cross-target check compares the runtimes with each other;
+this compares them with the code that uses them.
+
+---
 
 ## What kin owes, after both corrections
 
