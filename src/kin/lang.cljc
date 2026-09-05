@@ -315,24 +315,9 @@
                            (if (and elsewhere? (not= :rust (t c)))
                              (do (need! c home) (str home "." nm-str))
                              nm-str))
-               code (str (cond
-                           (or on-inst? (and method? (= :rust (t c))))
+               code (str (if (or on-inst? (and method? (= :rust (t c))))
                            (str (first as) "." (target-name c nm)
                                 "(" (str/join ", " (rest as)) ")")
-                           ;; A NON-METHOD, IN RUST, FROM ITS OWN UNIT. Java
-                           ;; and C# put a receiverless function beside its
-                           ;; siblings in one class, so the bare name finds it.
-                           ;; Rust puts it in an `impl` block, where the bare
-                           ;; name is not in scope and `Self::` is how you say
-                           ;; "the one next to me". Without this a `defn` with
-                           ;; no `^:method` compiled in two targets and not the
-                           ;; third, which is the shape this project keeps
-                           ;; finding one source at a time.
-                           (and (= :rust (t c)) (nil? home))
-                           (str "Self::" (target-name c nm)
-                                "(" (str/join ", " as) ")")
-
-                           :else
                            (str (qualified (target-name c nm))
                                 "(" (str/join ", " as) ")"))
                          (if (and throws? (= :rust (t c))) "?" ""))]
