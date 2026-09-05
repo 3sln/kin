@@ -83,6 +83,30 @@
       #(and % (str/includes? % "static") (str/includes? % "reserved"))
       thrown))
 
+
+;; ------------------------------------------- a function with no receiver
+;;
+;; Java and C# put a receiverless function beside its siblings in ONE CLASS, so
+;; the bare name finds it. Rust puts it in an `impl` block, where the bare name
+;; is not in scope. A `defn` with no `^:method` therefore compiled in two
+;; targets and not the third, and the generated Rust said `pow31(n)` where it
+;; had to say `Self::pow31(n)`.
+
+(def two-fns
+  '[(defn ^:pub ^I32 helper [^I32 a] (return a))
+    (defn ^:pub ^:method ^I32 f [^Rt rt ^I32 b] (return (helper b)))])
+
+(let [out (render :rust two-fns)]
+  (is "rust calls a receiverless sibling through Self::"
+      #(str/includes? % "Self::helper(b)") out)
+  (is "rust does not emit the bare name" #(not (str/includes? % " helper(b)")) out))
+(let [out (render :java two-fns)]
+  (is "java calls it by the bare name" #(str/includes? % "helper(b)") out)
+  (is "java does not invent a receiver" #(not (str/includes? % "Self")) out))
+(let [out (render :csharp two-fns)]
+  (is "csharp calls it by the bare name, pascalised" #(str/includes? % "Helper(b)") out)
+  (is "csharp does not invent a receiver" #(not (str/includes? % "Self")) out))
+
 (println (if (zero? @failures)
            "\nreserved: a keyword in one language is a keyword in its signature too\n"
            (format "\nreserved: %d FAILURE(S)\n" @failures)))
