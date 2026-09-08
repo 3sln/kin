@@ -106,6 +106,54 @@
     "kingen/gcd.go"
     (kin.target/module-path "kingen" 'gcd {:ext "go"}))
 
+;; ---------------------------------------------------------------------------
+;; 6. WHAT A NAMESPACE COMPILES TO, which is the other half of the same fact.
+;;
+;; `module-path` answers where the file is WRITTEN; `module-unit` answers what
+;; a reference from elsewhere must NAME. They have to agree -- a target whose
+;; two answers disagree emits files that cannot see each other -- so they take
+;; the same shape and are read side by side here.
+(is "6. the default mirrors the namespace, each language its own way"
+    ["crate::flint::rt::champ" "flint.rt.Champ" "flint.rt.Champ"]
+    (mapv #(:qualified (kin.target/module-unit % 'flint.rt.champ))
+          [:rust :java :csharp]))
+
+(is "6. the simple name and the parent are separate -- a reference needs one and a header the other"
+    [["champ" "crate::flint::rt"] ["Champ" "flint.rt"]]
+    [((juxt :name :parent) (kin.target/module-unit :rust 'flint.rt.champ))
+     ((juxt :name :parent) (kin.target/module-unit :java 'flint.rt.champ))])
+
+;; A ROOT AND A DROPPED HEAD are what a real tree needs, and they are one line
+;; of `:unit` rather than a whole `:emit`. These three are the conventions the
+;; one project using kin actually writes.
+(is "6. a root, a dropped head and C#'s casing are options, not a rewrite"
+    ["crate::kgen::rt::champ"
+     "com._3sln.flint.kgen.rt.Champ"
+     "_3sln.Flint.Kgen.Rt.Champ"]
+    [(:qualified (kin.target/module-unit
+                  :rust 'flint.rt.champ {:root ["kgen"] :drop 1}))
+     (:qualified (kin.target/module-unit
+                  :java 'flint.rt.champ
+                  {:root ["com" "_3sln" "flint" "kgen"] :drop 1}))
+     (:qualified (kin.target/module-unit
+                  :csharp 'flint.rt.champ
+                  {:root ["_3sln" "Flint" "Kgen"] :drop 1
+                   :pascal-parents? true}))])
+
+;; THE NAMESPACE IS CARRIED, and it is what units are compared BY. Two
+;; namespaces whose last segments agree spell the same class name, and a
+;; comparison on the spelling alone would call them one unit and drop the
+;; import between them.
+(is "6. two namespaces with the same tail are not the same unit"
+    [true false]
+    (let [a (kin.target/module-unit :java 'flint.rt.eq)
+          b (kin.target/module-unit :java 'flint.gc.eq)]
+      [(= (:name a) (:name b)) (= a b)]))
+
+(is "6. a single-segment namespace has no parent to qualify with"
+    [nil "Gcd"]
+    ((juxt :parent :qualified) (kin.target/module-unit :java 'gcd)))
+
 (println)
 (if (zero? @failures)
   (println "contexts: the slots dispatch and the capabilities are distinct\n")

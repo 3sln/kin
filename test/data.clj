@@ -252,8 +252,13 @@
     (vec (sort (keys (:forms (get-in linked [:vocabularies 's.a]))))))
 
 (let [out (kp/generate linked (get sources "b.kin") "b.kin")]
+  ;; QUALIFIED, by the shipped `:emit`. The accessor's template expands to
+  ;; the table's binding, and the binding is a NAME with a home -- so reading
+  ;; it from another namespace crosses a unit and is spelled accordingly. It
+  ;; was a bare `CASE_UPPER` until the default arrived, which resolved only in
+  ;; a project that had derived the import some other way.
   (is "3. another namespace refers one and calls it" true
-      (str/includes? (:java out) "return CASE_UPPER[i * 4 + 0];"))
+      (str/includes? (:java out) "return A.CASE_UPPER[i * 4 + 0];"))
   (is "3. and the count accessor crosses too" true
       (str/includes? (:java out) "return 2;")))
 
@@ -404,7 +409,7 @@
   (is "3. a source requiring them generates for BOTH targets, not none"
       [:rust :java] (vec (keys out)))
   (is "3. and the accessor call crosses the boundary" true
-      (str/includes? (:java out) "return CASE_UPPER[i * 4 + 2];")))
+      (str/includes? (:java out) "return V.CASE_UPPER[i * 4 + 2];")))
 
 ;; And the table-only module still emits everything it should on its own --
 ;; generating it ALONE always worked, which is what made the defect confusing.
@@ -443,8 +448,11 @@
              :accessors {^I32 weights-at [^Rt rt ^I32 i]})
            (defn ^:method ^I32 one [^Rt rt] (return (weights-at rt 1)))"
       out (:java (kp/generate prj src "help.kin"))]
+  ;; INDENTED ONE LEVEL, because the shipped `:emit` puts the body inside the
+  ;; class the namespace compiles to and the scope that opens it says so.
   (is "4. the helper body reaches the module" true
-      (str/includes? out "static int lookupWEIGHTS(int i) {\n    return [3 4 5][i] * 2;\n}"))
+      (str/includes?
+       out "    static int lookupWEIGHTS(int i) {\n        return [3 4 5][i] * 2;\n    }"))
   (is "4. and the accessor's template calls it" true
       (str/includes? out "return lookupWEIGHTS(1);")))
 

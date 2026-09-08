@@ -108,8 +108,23 @@
 (let [out (kp/generate prj (get sources "b.kin") "b.kin")]
   (is "3. b calls a's export -- Rust reaches it through self"
       true (str/includes? (:rust out) "return self.twice(x);"))
+  ;; JAVA'S SHAPE IS NOW QUALIFIED, and that is the shipped `:emit` doing the
+  ;; job the whole cross-unit path existed for. `twice` lives in `s.a`, which
+  ;; compiles to the class `s.A`; `quad` is being emitted inside `s.B`. It
+  ;; used to be a bare `twice(rt, x)` -- correct only for a project that had
+  ;; ALSO derived a static import by scanning its own sources.
   (is "4. and Java gets Java's shape, not one kin invented"
-      true (str/includes? (:java out) "return twice(rt, x);")))
+      true (str/includes? (:java out) "return A.twice(rt, x);"))
+  ;; AND NO IMPORT, because `s.A` and `s.B` are in the same package and a
+  ;; sibling there is already in scope. The reference DID register the need
+  ;; -- section 9 reads it off a header where the packages differ -- and the
+  ;; header declined to write a line that would have been legal and useless.
+  (is "4. and a same-package sibling needs no import for it"
+      false (str/includes? (:java out) "import "))
+  ;; RUST NEEDS NONE: both halves are methods on one type, `self.twice(x)`
+  ;; asks the qualifier for nothing, and nothing is registered.
+  (is "4. and Rust's method call registers no import at all"
+      false (str/includes? (:rust out) "use ")))
 
 (is "3. and the order is a topological one -- a before b"
     ["a.kin" "b.kin"]
@@ -322,15 +337,105 @@
 ;; A NAME REACHED FROM A NAMESPACE WITH NO UNITS AT ALL is bare and registers
 ;; nothing -- the same answer a call gets, and the reason a project that
 ;; splices regions sees no change from any of this.
-(let [plain (kp/resolve-exports
+;;
+;; `dissoc :emit`, and the dissoc is the statement. A unit derivation and the
+;; frame it is put in are ONE thing: the shipped `:emit` installs the
+;; derivation and opens the frame, so taking the `:emit` away takes both. A
+;; target with neither is exactly the region-splicing project this promises
+;; nothing changes for.
+(let [regions (dissoc kin.target/java :emit)
+      plain (kp/resolve-exports
              (kp/project {:vocabularies [vocabulary]
-                          :targets {:java kin.target/java}
+                          :targets {:java regions}
                           :target-order [:java]
                           :sources {:vfs (vfs/memory-vfs const-sources)
                                     :match "*.kin"}}))
       out (:java (kp/generate plain (get const-sources "m.kin") "m.kin"))]
   (is "8. a target that names no `:unit` gets the bare spelling" true
       (str/includes? out "return LIMIT;")))
+
+;; 9. THE SHIPPED TARGET LINKS WITHOUT BEING TOLD TO, which is what the
+;; default `:emit` is for. Every assertion above about units was written
+;; against a target the TEST supplied -- `unit-java`, twenty lines of `:unit`
+;; plus `:emit` plus a `:needs` atom -- and every project had to write those
+;; twenty lines before a cross-module reference resolved at all. flint wrote
+;; them, then had to derive its imports a SECOND way, by scanning all 82 of
+;; its sources for the names they define, because the reference itself
+;; contributed nothing.
+(let [shipped (kp/resolve-exports
+               (kp/project {:vocabularies [vocabulary]
+                            :targets {:java kin.target/java
+                                      :rust kin.target/rust}
+                            :target-order [:rust :java]
+                            :sources {:vfs (vfs/memory-vfs const-sources)
+                                      :match "*.kin"}}))
+      out (kp/generate shipped (get const-sources "m.kin") "m.kin")
+      own (kp/generate shipped (get const-sources "k.kin") "k.kin")]
+  (is "9. a constant from another namespace is qualified, with NO :unit set"
+      true (str/includes? (:java out) "return K.LIMIT;"))
+  ;; NO IMPORT HERE, because `s.K` and `s.M` are one package. The header the
+  ;; need actually reaches is asserted below, where the packages differ.
+  (is "9. and a same-package sibling is qualified without an import"
+      false (str/includes? (:java out) "import "))
+  ;; RUST QUALIFIES NOTHING and imports the module instead -- `default-cross-
+  ;; unit` answers bare there, and a `use` is what a crate reaches a sibling
+  ;; through.
+  (is "9. Rust spells it bare and reaches the module with a `use`"
+      [true true]
+      [(str/includes? (:rust out) "return LIMIT;")
+       (str/includes? (:rust out) "use crate::s::k::*;\n")])
+  ;; THE DECLARING FILE'S OWN USE IS BARE, and imports nothing. Same rule,
+  ;; both sides, so the frame and the derivation cannot disagree.
+  (is "9. and the declaring namespace's own use is bare and imports nothing"
+      [true false]
+      [(str/includes? (:java own) "return LIMIT;")
+       (str/includes? (:java own) "import ")])
+  ;; A VOCABULARY'S PLAIN PER-TARGET NAME still links to nothing. `TY_STR` is
+  ;; a string in a map; there is no module it belongs to and nothing to
+  ;; import. The default must not invent one.
+  (let [voc (:java (kp/generate shipped (get const-sources "w.kin") "w.kin"))]
+    (is "9. a vocabulary's plain per-target name is untouched by the default"
+        [true false]
+        [(str/includes? voc "return TY_STR;")
+         (str/includes? voc "import ")])))
+
+;; 9. AND THE HEADER, where the two namespaces are in different packages and
+;; the import is the thing that makes the reference resolve. This is the case
+;; the whole `need!`/anchor path exists for: the anchor is dropped before a
+;; line of the body is emitted, and the import is written into it afterwards,
+;; from what the body asked for on its way past.
+(def deep-sources
+  {"dk.kin"
+   "(ns deep.one.k (:require [demo :refer [defn defconst return I32 Rt]]))
+    (defconst ^:pub ^I32 LIMIT 200)
+    (defn ^:pub ^I32 twice [^I32 x] (return x))"
+   "dm.kin"
+   "(ns deep.two.m (:require [demo :refer [defn return I32 Rt]]
+                             [deep.one.k :refer [LIMIT twice]]))
+    (defn ^:pub ^I32 cap [^I32 x] (return LIMIT))
+    (defn ^:pub ^I32 dbl [^I32 x] (return (twice x)))"})
+
+(let [deep (kp/resolve-exports
+            (kp/project {:vocabularies [vocabulary]
+                         :targets {:java kin.target/java :rust kin.target/rust}
+                         :target-order [:rust :java]
+                         :sources {:vfs (vfs/memory-vfs deep-sources)
+                                   :match "*.kin"}}))
+      out (kp/generate deep (get deep-sources "dm.kin") "dm.kin")]
+  (is "9. a reference across PACKAGES is qualified and imported"
+      [true true true]
+      [(str/includes? (:java out) "package deep.two;\n")
+       (str/includes? (:java out) "return K.LIMIT;")
+       (str/includes? (:java out) "import deep.one.K;\n")])
+  ;; ONE IMPORT, not two. A constant and a free function from the same
+  ;; namespace are two needs and one header line -- the set is deduped and
+  ;; SORTED, which is what keeps a drift gate from failing at random.
+  (is "9. and two references to one namespace are one import line"
+      1 (count (re-seq #"import " (:java out))))
+  ;; RUST HAS NO SAME-PACKAGE EXEMPTION: a sibling module is not in scope
+  ;; whatever it is called, so the `use` is written either way.
+  (is "9. and Rust writes the `use` regardless of where the module sits"
+      true (str/includes? (:rust out) "use crate::deep::one::k::*;\n")))
 
 ;; 5. A REQUIRE CYCLE IS REFUSED, naming the loop. kin follows Clojure:
 ;; namespace dependencies form a DAG. Two namespaces that call each other are

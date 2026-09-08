@@ -191,23 +191,40 @@
 
 (defn- ty-of [ctx default tag] (get-in (or (kin/tag ctx tag) default) [:types (t ctx)]))
 
+;; TWO QUESTIONS, NOT ONE, and this is where they are answered.
+;;
+;;   WHERE AM I?    the `:kin/unit` FRAME, read below by `qualifier`. Only
+;;                  the file being emitted has one.
+;;   WHERE IS THAT? `:unit`, a FUNCTION of the namespace, asked at a
+;;                  reference about a namespace whose `:emit` is not running
+;;                  and which therefore has no frame to read.
+;;
+;; They look like one question and are not, which is why neither could
+;; replace the other. What was missing is the thing that makes them agree:
+;; `kin.target/module-emitter` computes the frame FROM `:unit`, so a target
+;; using the default cannot open one unit and claim another.
+
 (defn- unit-of
   "The unit `ns-sym` is emitted into for THIS target, or nil.
 
   A function of the namespace alone, which is what makes it askable from a
   reference in a different file: the answer does not depend on what frame is
   open, only on which namespace declared the thing and which target is being
-  written. A target that names no `:unit` has no units, and gets nil."
+  written. A target that names no `:unit` has no units, and gets nil.
+
+  `kin.target/unit-of` is where it lives, because the default `:emit` asks
+  the same question and one derivation is the whole point."
   [ctx ns-sym]
-  (when-let [f (get-in ctx [:targets (t ctx) :unit])] (f ns-sym)))
+  (kin.target/unit-of ctx ns-sym))
 
 (defn- home-unit
   "The unit a target would open for the namespace being emitted, or nil.
 
-  Asked of the TARGET rather than read from the scope, because a definition
-  is registered during the scan -- before any `:emit` has run and before any
-  frame exists. A target computes it from the namespace exactly as it
-  computes `:path`, so the two sides agree by construction."
+  THE FRAME FIRST, and the target only if there is none. A frame is the
+  target having already decided, in this file, for this emit; asking `:unit`
+  a second time could only agree or disagree, and disagreeing is the failure
+  worth removing. The fallback is what a definition registered during the
+  scan gets -- before any `:emit` has run and before any frame exists."
   [ctx]
   (or (kin/get ctx :kin/unit) (unit-of ctx (:kin/ns ctx))))
 
@@ -219,9 +236,13 @@
   hold several inherent `impl` blocks, so there is nothing to qualify with.
   This is exactly what `declared-call` did unconditionally before targets
   could answer for themselves, so a project that says nothing sees no
-  change."
+  change.
+
+  `unit-label` rather than `home` itself: a unit may be a MAP describing what
+  the namespace compiles to, and only its simple name belongs in front of a
+  dot. A unit that is a plain string is still spelled verbatim."
   [ctx home nm]
-  (if (= :rust (t ctx)) nm (str home "." nm)))
+  (if (= :rust (t ctx)) nm (str (kin.target/unit-label home) "." nm)))
 
 (defn- qualifier
   "How a reference emitted in `c` must spell something `home` declares.

@@ -134,11 +134,17 @@
 
 ;; 5. A `:path` with no `:emit` asks kin to write a fragment. There is
 ;; nowhere to put one now, so it is refused by name.
+;;
+;; `dissoc` RATHER THAN A BARE `kin.target/rust`, because the shipped targets
+;; carry a default `:emit` now. Taking it away is what makes this the
+;; configuration the refusal is about -- a target that writes files and has
+;; not said what a file looks like -- and stating it that way keeps the test
+;; pointed at the rule instead of at whichever target happened to lack one.
 (refuses "5. a :path with no :emit"
          #(kp/emit! (kp/project
                      {:vocabularies [vocabulary]
                       :target-order [:rust]
-                      :targets {:rust (merge kin.target/rust
+                      :targets {:rust (merge (dissoc kin.target/rust :emit)
                                              {:vfs (vfs/memory-vfs {})
                                               :path (fn [_] "thing.rs")})}})
                     src-text "thing.kin"))
@@ -221,7 +227,12 @@
 (is "10. a target with :emit produces whole files" true
     (kp/whole-file? whole-target))
 (is "10. and one without does not" false
-    (kp/whole-file? (merge kin.target/rust {:path (fn [_] "x.rs")})))
+    (kp/whole-file? (merge (dissoc kin.target/rust :emit)
+                           {:path (fn [_] "x.rs")})))
+;; AND THE SHIPPED ONE HAS ONE, which is the change: a project no longer has
+;; to write a `:emit` before it can write a file at all.
+(is "10. and the shipped target ships with one" true
+    (kp/whole-file? kin.target/rust))
 
 (let [fs (vfs/memory-vfs {})
       prj (kp/project {:vocabularies [vocabulary]
