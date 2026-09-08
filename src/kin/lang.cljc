@@ -12,6 +12,8 @@
   by accident, which is why this is a namespace a source has to name."
   (:require [kin]
             [kin.target]
+            [kin.vfs :as vfs]
+            [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (defn t [ctx] (:target ctx))
@@ -189,6 +191,85 @@
 
 (defn- ty-of [ctx default tag] (get-in (or (kin/tag ctx tag) default) [:types (t ctx)]))
 
+(defn- home-unit
+  "The unit a target would open for the namespace being emitted, or nil.
+
+  Asked of the TARGET rather than read from the scope, because a definition
+  is registered during the scan -- before any `:emit` has run and before any
+  frame exists. A target computes it from the namespace exactly as it
+  computes `:path`, so the two sides agree by construction."
+  [ctx]
+  (or (kin/get ctx :kin/unit)
+      (when-let [f (get-in ctx [:targets (t ctx) :unit])]
+        (f (:kin/ns ctx)))))
+
+(defn- default-cross-unit
+  "How a cross-unit reference is spelled when the target says nothing.
+
+  `Home.name` on the two languages that put a function inside a class, and
+  BARE in Rust -- where both halves are methods on one type and a crate may
+  hold several inherent `impl` blocks, so there is nothing to qualify with.
+  This is exactly what `declared-call` did unconditionally before targets
+  could answer for themselves, so a project that says nothing sees no
+  change."
+  [ctx home nm]
+  (if (= :rust (t ctx)) nm (str home "." nm)))
+
+(defn- declared-call
+  "The callable a DECLARATION registers under its own name.
+
+  ONE call site for every declaration form. `defn` and `defdata` disagree
+  about exactly one thing -- what the call SPELLS, a function call against
+  an emitter's template -- and agree about everything around it: the tag the
+  reference produces, whether it sits in statement or expression position,
+  and whether it crosses a unit boundary and so needs qualifying and an
+  import. Sharing this is what makes a `defdata` accessor an ORDINARY
+  binding rather than a second kind of one: refer it across namespaces, call
+  it from a sibling module, and it behaves as a `defn` does because it IS
+  the same machinery.
+
+  `spell` is `(fn [ctx qualify arg-texts] -> String)`. `qualify` takes a
+  name as this unit spells it and answers it as the CALL SITE must -- bare
+  within the same unit, and from another unit whatever that TARGET spells a
+  cross-unit reference as, with the import registered either way.
+  `arg-texts` are rendered and NOT paren-stripped: a function call puts
+  every argument between delimiters and may strip unconditionally, and a
+  template may not, so the decision belongs to whoever knows the shape."
+  [{:keys [ret home]} spell]
+  (fn [c f]
+    ;; A GENERATED DEFINITION REGISTERS ITS OWN RETURN TAG. It already states
+    ;; one, so a later call to it in the same file carries that tag with no
+    ;; further annotation. This is the cheapest of the four ways a tag
+    ;; arrives and the one the sources already pay for.
+    (kin/tagged! c (kin/tag c ret))
+    (let [as (mapv (fn [x] (kin/render c x)) (rest f))
+          here (kin/get c :kin/unit)
+          ;; A RUST METHOD IS THE SAME EVERYWHERE: both halves are methods
+          ;; on one type, and a crate may have several inherent `impl`
+          ;; blocks. So `elsewhere?` only bites in the two languages that put
+          ;; a function inside a class.
+          elsewhere? (and home here (not= home here))
+          ;; THE IMPORT AND THE PREFIX ARE TWO QUESTIONS, and welding them
+          ;; together was a mistake. `need!` answers `this reference leaves
+          ;; the unit`, which is true whatever the spelling; the prefix
+          ;; answers `and this target writes that as ...`, which is the
+          ;; target's business. A language that reaches a sibling through a
+          ;; STATIC IMPORT wants the name bare AND the import registered --
+          ;; `import static com.example.Casetable.*;` with `CASE_FULL[i]` in
+          ;; the body -- and while the two were one branch that combination
+          ;; could not be expressed at all. `:cross-unit` is asked of the
+          ;; target the same way `:unit` and `:local-name` are.
+          qualify (fn [nm-str]
+                    (if elsewhere?
+                      (do (need! c home)
+                          ((get-in c [:targets (t c) :cross-unit] default-cross-unit)
+                           c home nm-str))
+                      nm-str))
+          code (spell c qualify as)]
+      (if (= :statement (kin/position c))
+        (kin/emit! c (kin/indent-of c) code ";\n")
+        (kin/emit! c code)))))
+
 (defn- defn-form
   "A function, framed the way each target frames one.
 
@@ -284,46 +365,21 @@
       ;; did before any of this existed.
       (kin/define-form!
        ctx {:scope (if pub? :public :private)} nm
-       ;; The unit a target would open for THIS namespace. Asked of the
-       ;; target rather than read from the scope, because a definition is
-       ;; registered during the scan -- before any `:emit` has run and before
-       ;; any frame exists. A target computes it from the namespace exactly as
-       ;; it computes `:path`, so the two sides agree by construction.
-       (let [home (or (kin/get ctx :kin/unit)
-                      (when-let [f (get-in ctx [:targets (t ctx) :unit])]
-                        (f (:kin/ns ctx))))]
-        (fn [c f]
-         ;; A GENERATED FUNCTION REGISTERS ITS OWN RETURN TAG. It already
-         ;; states one -- `defn ^Value cn-key` -- so a later call to it in the
-         ;; same file carries that tag with no further annotation. This is the
-         ;; cheapest of the four ways a tag arrives and the one the sources
-         ;; already pay for.
-         (kin/tagged! c (kin/tag c ret))
-         ;; Every argument of a call sits between delimiters -- `(`, `,`,
-         ;; `)` -- so its outer parentheses can only be noise. This is the
-         ;; same rule `delimited?` applies to a template, arrived at from the
-         ;; other side: a declared call has no template to inspect, but its
-         ;; shape guarantees what a template would have to prove.
-         (let [as (mapv (fn [x] (strip-parens (kin/render c x))) (rest f))
-               here (kin/get c :kin/unit)
-               ;; A RUST METHOD IS THE SAME EVERYWHERE: both halves are
-               ;; methods on one type, and a crate may have several inherent
-               ;; `impl` blocks. So `elsewhere?` only bites in the two
-               ;; languages that put a function inside a class.
-               elsewhere? (and home here (not= home here))
-               qualified (fn [nm-str]
-                           (if (and elsewhere? (not= :rust (t c)))
-                             (do (need! c home) (str home "." nm-str))
-                             nm-str))
-               code (str (if (or on-inst? (and method? (= :rust (t c))))
-                           (str (first as) "." (target-name c nm)
-                                "(" (str/join ", " (rest as)) ")")
-                           (str (qualified (target-name c nm))
-                                "(" (str/join ", " as) ")"))
-                         (if (and throws? (= :rust (t c))) "?" ""))]
-           (if (= :statement (kin/position c))
-             (kin/emit! c (kin/indent-of c) code ";\n")
-             (kin/emit! c code))))))
+       (declared-call
+        {:ret ret :home (home-unit ctx)}
+        (fn [c qualified args]
+          ;; Every argument of a call sits between delimiters -- `(`, `,`,
+          ;; `)` -- so its outer parentheses can only be noise. This is the
+          ;; same rule `delimited?` applies to a template, arrived at from the
+          ;; other side: a declared call has no template to inspect, but its
+          ;; shape guarantees what a template would have to prove.
+          (let [as (mapv strip-parens args)]
+            (str (if (or on-inst? (and method? (= :rust (t c))))
+                   (str (first as) "." (target-name c nm)
+                        "(" (str/join ", " (rest as)) ")")
+                   (str (qualified (target-name c nm))
+                        "(" (str/join ", " as) ")"))
+                 (if (and throws? (= :rust (t c))) "?" ""))))))
       ;; EXPORTED when the source says `^:pub`, and only then. A file is full
       ;; of helpers that are nobody else's business, and without a gate every
       ;; one of them would leak and the module boundary would mean nothing.
@@ -785,17 +841,62 @@
 (defn- const-name
   "Rust and Java SCREAM a constant; C# pascalises it. `SEED` against `Seed`,
   `HASH_TRUE` against `HashTrue` -- the existing three files already disagree
-  this way and their callers are written to it, so the port has to keep it."
+  this way and their callers are written to it, so the port has to keep it.
+
+  IT SPLITS ON `_` AND ONLY ON `_`, so the name it is handed has to be
+  `SCREAMING_SNAKE` already. `check-const-name!` is what makes that true
+  rather than hoped for."
   [target nm]
   (if (= :csharp target)
     (str/join (mapv str/capitalize (str/split (str nm) #"_")))
     (str nm)))
 
-(defn- defconst-form
+(defn- check-const-name!
+  "Refuse a `defconst` name that is not `SCREAMING_SNAKE`, naming it.
+
+  `const-name` splits on `_`, so a kebab-case name went through untouched
+  and emitted code that compiles in NO target -- `pub const case-upper-len:
+  u32 = 200;`, `public const int Case-upper-len = 200;`. Nothing said so:
+  the source was wrong, and the generator agreed with it in three languages
+  at once. Emitting code that cannot compile is worse than refusing the
+  name, because it keeps the mistake and spends the one moment at which it
+  was cheap to find.
+
+  This is the rule kin already applies from the other side. `literal` throws
+  on a constant-shaped symbol that is not a declared name, because passing a
+  name through verbatim is only right when every target agrees and that is a
+  thing to STATE rather than to assume; this is the identical argument about
+  the DECLARATION rather than about the reference.
+
+  `defdata` is deliberately not held to it: a table is named the way a
+  `defn` is -- `case-upper` -- and `data-name` DERIVES the screaming
+  spelling per target rather than demanding it be typed."
+  [ctx nm]
+  (when-not (re-matches #"[A-Z][A-Z0-9_]*" (str nm))
+    (throw (ex-info
+            (str "kin: `(defconst " nm " ...)` -- a constant is named"
+                 " SCREAMING_SNAKE, and `" nm "` is not. Rust and Java emit"
+                 " it as written and C# pascalises it by splitting on `_`,"
+                 " so this emits `" (const-name (t ctx) nm) "` into "
+                 (name (t ctx)) ", which is not an identifier there. Write it"
+                 " `" (str/join "_" (mapv str/upper-case
+                                          (str/split (str nm) #"[-_]")))
+                 "`.")
+            {:form 'defconst :symbol nm :target (t ctx)})))
+  nm)
+
+(defn- const-spellings
+  "How each target spells this constant. Pure, so `:declare` and `:generate`
+  answer the same thing without one of them having to run first."
+  [nm]
+  (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))
+
+(defn- defconst-generate
   "A named constant. `^:pub` when it is part of the API."
   [ctx form]
   (let [[_ nm v] form
         pub? (:pub (meta nm))
+        _ (check-const-name! ctx nm)
         cn (const-name (t ctx) nm)
         tag (kin/tag ctx (:tag (meta nm)))
         _ (kin/define-tag! ctx {:scope :private} nm tag)
@@ -814,7 +915,461 @@
        :java (str "public static final " ty " " cn " = " lit ";\n")
        :csharp (str (if pub? "public " "internal ") "const " ty " " cn " = " lit ";\n")))
     (kin/define-name!
-     ctx {:scope (if pub? :public :private)} nm (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))))
+     ctx {:scope (if pub? :public :private)} nm (const-spellings nm))))
+
+(def ^:private defconst-form
+  "TWO SLOTS, for the reason `defn` has two.
+
+  `:declare` used to be absent, and a constant was therefore a name that
+  came into existence only by being GENERATED. That is invisible to anything
+  asking what a source defines without emitting it -- which is what
+  `kin.project/declared-names` is for, and what a consumer deriving its
+  imports needs. The spelling is pure, so declaring it costs nothing and
+  says the same thing generate will."
+  {:declare (fn [ctx form]
+              (let [nm (second form)]
+                (check-const-name! ctx nm)
+                (kin/define-name!
+                 ctx {:scope (if (:pub (meta nm)) :public :private)}
+                 nm (const-spellings nm))))
+   :generate defconst-generate})
+
+;; --------------------------------------------------------------- defdata
+;;
+;; A DATA TABLE, generated into every target.
+;;
+;;     (defdata case-upper
+;;       "Uppercase ranges: [start end delta stride]."
+;;       :path "data/casetable.edn"          ; OR :data [...inline edn...]
+;;       :key :upper                         ; optional: a key out of the file
+;;       :emitter kin.lang/flat-array        ; named; there is NO default
+;;       :stride 4                           ; passed to the emitter
+;;       :accessors {^I32 case-upper-n  [^Rt rt]
+;;                   ^Cmp case-upper-at [^Rt rt ^I32 i ^I32 f]})
+;;
+;; This replaces a bespoke per-table script -- hardcoded per-language string
+;; templates, hardcoded destination paths, and a hand-written accessor in
+;; every runtime.
+;;
+;; FOUR THINGS ARE LOAD-BEARING, and each is a decision rather than a detail:
+;;
+;; 1. PROVENANCE IS ERASED before the emitter runs. `:path` is read through
+;;    the target's `:vfs` -- kin performs no I/O of its own, ever -- and
+;;    `:data` is inline; both arrive at the emitter as parsed data and it
+;;    cannot tell which it was. A table that moves into a file must not
+;;    change what is generated from it.
+;;
+;; 2. THE EMITTER IS NAMED, NEVER DEFAULTED. A fallback cannot know what an
+;;    accessor MEANS: given `case-upper-at [^Rt rt ^I32 i ^I32 f]` it would
+;;    have to guess that `f` indexes a field within a stride-4 record. So a
+;;    declaration says which emitter, and a missing one is refused by name.
+;;
+;; 3. THE LOOKUP IS THE EXISTING TARGET-CONFIG MECHANISM. `:data-emitters`
+;;    sits in the target map beside `:indent-unit`, `:local-name` and
+;;    `:unit`, and is read the same way. There is no registry, no resolver
+;;    and no new door -- a project that can configure a target can configure
+;;    an emitter.
+;;
+;; 4. THE DECLARED SIGNATURE IS KIN'S CONTRACT, NOT THE EMITTER'S. An
+;;    emitter is told the arity and the tags and must satisfy them; it
+;;    cannot add an accessor, drop one, or reach past the arity it was
+;;    given. What it decides is the TEXT.
+;;
+;; And the tag on an accessor is a HINT to the emitter, not a type kin
+;; enforces on the data: `^Cmp` does not mean "array of Cmp", because the
+;; data may render as a map, an object literal or a packed blob. The emitter
+;; answers both the `:type` and the `:expr`.
+
+(defn- data-name
+  "A dashed `defdata` name, spelled as this target spells a module-level
+  constant.
+
+  `const-name` one step further back: it takes a name already written
+  `HASH_TRUE`, because that is how `defconst` is written. A `defdata` is
+  named the way a `defn` is -- `case-upper` -- so the screaming is derived
+  here rather than typed by hand, and the three disagree exactly as they
+  already do about a constant."
+  [target nm]
+  (let [parts (str/split (str nm) #"-")]
+    (if (= :csharp target)
+      (str/join (mapv str/capitalize parts))
+      (str/join "_" (mapv str/upper-case parts)))))
+
+(defn- declaration-opts
+  "A `defdata`'s optional docstring and its option map.
+
+  The docstring is positional and optional, exactly as in `defn` -- and
+  unlike `defn` it reaches the OUTPUT, as a `///` comment, because a data
+  table generated into three runtimes is the one thing a reader of the
+  generated file cannot work out from the code."
+  [nm more]
+  (let [doc (when (string? (first more)) (first more))
+        kvs (if doc (rest more) more)]
+    (when (odd? (count kvs))
+      (throw (ex-info (str "kin: `(defdata " nm " ...)` has an odd number of"
+                           " options -- they are key/value pairs after the"
+                           " optional docstring.")
+                      {:form nm :options (vec kvs)})))
+    (assoc (apply hash-map kvs) :doc doc)))
+
+(defn- data-of
+  "The DATA a declaration carries, with its provenance erased.
+
+  `:path` is read THROUGH THE TARGET'S VFS and parsed as EDN. kin performs
+  no file I/O of its own -- a vfs is the only door, and that is a hard
+  invariant rather than a preference -- so a target that means to declare
+  data from a file has to say where it can be read from, the same way it
+  says where its output is written.
+
+  `:key` selects out of the parsed value, because one file usefully holds
+  several tables. A vector is a path, a anything else a single key."
+  [ctx nm {:keys [data path] k :key}]
+  (when (and (some? data) (some? path))
+    (throw (ex-info (str "kin: `(defdata " nm " ...)` gives BOTH `:data` and"
+                         " `:path`. They are the two ways of saying the same"
+                         " thing and the emitter cannot tell them apart, so"
+                         " naming both says nothing about which is meant.")
+                    {:form nm :path path})))
+  (when (and (nil? data) (nil? path))
+    (throw (ex-info (str "kin: `(defdata " nm " ...)` carries no data -- give"
+                         " it `:data` inline or a `:path` to read through the"
+                         " target's vfs.")
+                    {:form nm})))
+  (let [raw (if path
+              (let [tgt (get-in ctx [:targets (t ctx)])
+                    fs (or (vfs/resolve-vfs tgt)
+                           (throw (ex-info
+                                   (str "kin: `(defdata " nm " ...)` reads "
+                                        (pr-str path) ", and target " (t ctx)
+                                        " has no `:vfs` to read it through."
+                                        " kin opens no file of its own.")
+                                   {:form nm :path path :target (t ctx)})))]
+                (when-not (vfs/-exists? fs path)
+                  (throw (ex-info (str "kin: `(defdata " nm " ...)` reads "
+                                       (pr-str path) ", which is not in "
+                                       (t ctx) "'s vfs.")
+                                  {:form nm :path path :target (t ctx)})))
+                (edn/read-string {:readers {}} (vfs/-read fs path)))
+              data)]
+    (if (some? k)
+      (if (vector? k) (get-in raw k) (get raw k))
+      raw)))
+
+(defn- accessor-decls
+  "Each declared accessor, as DATA for the emitter.
+
+  Names, arity, tags and the type each tag has in THIS target -- everything
+  an emitter needs to write a template, and nothing it can use to change the
+  signature. The tag is passed as the symbol, as the tag VALUE, and as the
+  type it resolves to, because an emitter deciding an element type wants the
+  last and an emitter dispatching on a subject's own tag wants the first.
+
+  Sorted by name so that an error message, and any listing an emitter
+  builds, does not reorder between two runs of the same source."
+  [ctx default accessors]
+  (vec (for [[a-nm params] (sort-by (comp str key) accessors)
+             :let [ret (:tag (meta a-nm))]]
+         {:name a-nm
+          :pub (boolean (:pub (meta a-nm)))
+          :arity (count params)
+          :params (mapv (fn [p]
+                          {:name p :tag (:tag (meta p))
+                           :tag-value (kin/tag ctx (:tag (meta p)))
+                           :type (ty-of ctx default (:tag (meta p)))})
+                        params)
+          :ret ret
+          :ret-tag (kin/tag ctx ret)
+          :ret-type (ty-of ctx default ret)})))
+
+(defn- check-emitter!
+  "Did the emitter satisfy the DECLARATION?
+
+  The declared accessors are kin's contract. An emitter that answered a
+  template for a name nobody declared has invented a binding; one that
+  skipped a declared name has left a call site resolving to nothing three
+  files away; and one whose template reaches `{3}` in a two-argument
+  accessor is reading an argument that does not exist. All three used to be
+  possible in the hand-written scripts this form replaces, and all three
+  fail far from the cause -- so they are checked here, where the cause is."
+  [nm emitter target decls out]
+  (let [want (into #{} (map :name) decls)
+        got (set (keys (:accessors out)))
+        missing (vec (sort-by str (remove got want)))
+        extra (vec (sort-by str (remove want got)))]
+    (when (or (seq missing) (seq extra))
+      (throw (ex-info
+              (str "kin: emitter `" emitter "` did not satisfy `(defdata " nm
+                   " ...)` for " target "."
+                   (when (seq missing)
+                     (str " It answered nothing for " (str/join ", " (map str missing))
+                          ", which the declaration declares."))
+                   (when (seq extra)
+                     (str " It answered " (str/join ", " (map str extra))
+                          ", which the declaration does not -- an emitter"
+                          " satisfies a signature, it does not choose one.")))
+              {:form nm :emitter emitter :target target
+               :missing missing :unexpected extra})))
+    (doseq [{:keys [name arity]} decls
+            :let [tmpl (get (:accessors out) name)
+                  over (->> (re-seq #"\{(\d+)\}" (str tmpl))
+                            (map (comp parse-long second))
+                            (filter (fn [i] (>= i arity)))
+                            distinct sort vec)]]
+      (when (seq over)
+        (throw (ex-info
+                (str "kin: emitter `" emitter "`'s template for `" name "` in "
+                     target " reads " (str/join ", " (map (fn [i] (str "{" i "}")) over))
+                     ", and `" name "` takes " arity
+                     (if (= 1 arity) " argument." " arguments.")
+                     " The declared arity is kin's contract: "
+                     (pr-str tmpl))
+                {:form nm :emitter emitter :target target :accessor name
+                 :arity arity :template tmpl :out-of-range over}))))
+    (when (and (:expr out) (not (:type out)))
+      (throw (ex-info
+              (str "kin: emitter `" emitter "` answered an `:expr` for `"
+                   nm "` in " target " and no `:type`. A binding needs both,"
+                   " and only the emitter knows the type -- the accessor's"
+                   " tag is a hint about what the data MEANS, not a claim"
+                   " about how it is laid out.")
+              {:form nm :emitter emitter :target target :expr (:expr out)})))
+    out))
+
+(defn- emitter-of
+  "The emitter a declaration names, out of the TARGET MAP.
+
+  `(get-in ctx [:targets (:target ctx) :data-emitters])`, which is the same
+  door `:indent-unit`, `:local-name` and `:unit` come through. A project
+  that has configured a target has already configured everything an emitter
+  needs, and a target that cannot generate a table says so by not having
+  one."
+  [ctx nm sym]
+  (let [table (get-in ctx [:targets (t ctx) :data-emitters])]
+    (when-not sym
+      (throw (ex-info (str "kin: `(defdata " nm " ...)` names no `:emitter`,"
+                           " and there is deliberately no default -- an"
+                           " emitter kin picked could not know what an"
+                           " accessor MEANS, only what it is called.")
+                      {:form nm :target (t ctx)})))
+    (or (get table sym)
+        (throw (ex-info
+                (str "kin: `(defdata " nm " ...)` names the emitter `" sym
+                     "`, and target " (t ctx) " has no `:data-emitters` entry"
+                     " for it -- it has "
+                     (pr-str (vec (sort-by str (keys table))))
+                     ". An emitter is looked up in the target map, the same"
+                     " way `:indent-unit` and `:local-name` are.")
+                {:form nm :emitter sym :target (t ctx)
+                 :known (vec (sort-by str (keys table)))})))))
+
+(defn- defdata-form
+  "A data table, generated into every target, with its accessors.
+
+  TWO SLOTS, for the reason `defn` has two: `:declare` registers the names
+  so that link -- walking in order -- can resolve a later reference to an
+  accessor as LOCAL, and `:generate` reads the data, asks the emitter, emits
+  the binding and registers the accessors as callables.
+
+  An ACCESSOR IS AN ORDINARY BINDING. It goes through `declared-call`, which
+  is `defn`'s own call machinery, so `:refer` across namespaces, a sibling
+  module's qualified call and the import that call needs all work because
+  they are not reimplemented here."
+  [default]
+  {:declare
+   (fn [ctx form]
+     (let [[_ nm & more] form
+           pub? (boolean (:pub (meta nm)))
+           {:keys [accessors]} (declaration-opts nm more)]
+       ;; THE TABLE'S OWN NAME IS DECLARED HERE TOO, not only when generate
+       ;; emits the binding. A consumer asking what this source defines --
+       ;; to derive an import from it, say -- must get the same answer
+       ;; before emission as after, and the spelling is pure.
+       (kin/define-name!
+        ctx {:scope (if pub? :public :private)} nm
+        (reduce (fn [m tg] (assoc m tg (data-name tg nm))) {}
+                (or (seq (keys (:targets ctx))) [:rust :java :csharp])))
+       (doseq [a-nm (keys accessors)]
+         (kin/define-form!
+          ctx {:scope (if (or pub? (:pub (meta a-nm))) :public :private)}
+          a-nm {}))))
+   :generate
+   (fn [ctx form]
+     (let [[_ nm & more] form
+           {:keys [doc emitter accessors] :as opts} (declaration-opts nm more)
+           pub? (boolean (:pub (meta nm)))
+           decls (accessor-decls ctx default accessors)
+           bound (data-name (t ctx) nm)
+           out (check-emitter!
+                nm emitter (t ctx) decls
+                ((emitter-of ctx nm emitter)
+                 ctx
+                 {:name nm
+                  :target (t ctx)
+                  ;; What the binding is CALLED here, so a template can name
+                  ;; it. The emitter does not get to choose the spelling: a
+                  ;; table read from another module has to be found by the
+                  ;; name kin registered for it.
+                  :binding bound
+                  :data (data-of ctx nm opts)
+                  :accessors decls
+                  ;; Everything the declaration said that kin has no use for
+                  ;; -- `:stride`, and whatever the next emitter wants.
+                  :options (dissoc opts :data :path :key :emitter :accessors :doc)}))
+           home (home-unit ctx)]
+       (when doc
+         (doseq [line (str/split-lines doc)]
+           (kin/emit! ctx (kin/indent-of ctx) "/// " line "\n")))
+       ;; THE BINDING IS OPTIONAL. A target that only wants accessors omits
+       ;; `:type` and `:expr` and nothing is emitted; one that also wants the
+       ;; raw table visible to hand-written code supplies them. `:accessors`
+       ;; is the contract, and this is the courtesy.
+       (when (:expr out)
+         (kin/emit!
+          ctx (kin/indent-of ctx)
+          (case (t ctx)
+            ;; `static` rather than `const`: a table is read, not inlined at
+            ;; every use site, and a `const` array is copied into each one.
+            :rust (str (if pub? "pub " "pub(crate) ") "static " bound ": "
+                       (:type out) " = " (:expr out) ";\n")
+            :java (str "public static final " (:type out) " " bound " = "
+                       (:expr out) ";\n")
+            ;; `static readonly`, not `const`: C# `const` admits no array.
+            :csharp (str (if pub? "public " "internal ") "static readonly "
+                         (:type out) " " bound " = " (:expr out) ";\n")
+            (throw (ex-info
+                    (str "kin: `(defdata " nm " ...)` has a binding to emit"
+                         " for " (t ctx) " and kin.lang does not know how"
+                         " that target spells one. An emitter that answers"
+                         " only `:accessors` needs no spelling.")
+                    {:form nm :target (t ctx)}))))
+         (kin/define-name!
+          ctx {:scope (if pub? :public :private)} nm
+          (reduce (fn [m tg] (assoc m tg (data-name tg nm))) {}
+                  (or (seq (keys (:targets ctx))) [:rust :java :csharp]))))
+       ;; A HELPER THE EMITTER CONTRIBUTED. Where an accessor cannot be a
+       ;; one-line expansion, the emitter writes the body once, into the
+       ;; module, and has its template call it.
+       (doseq [h (:helpers out)]
+         (doseq [line (str/split-lines (str h))]
+           (kin/emit! ctx (kin/indent-of ctx) line "\n")))
+       (doseq [{a-nm :name :keys [ret pub]} decls]
+         (let [tmpl (get (:accessors out) a-nm)]
+           (kin/define-form!
+            ctx {:scope (if (or pub? pub) :public :private)} a-nm
+            (declared-call
+             {:ret ret :home home}
+             (fn [_ qualified args]
+               ;; `{unit}` IS THE QUALIFIER, and it is `defn`'s qualifier --
+               ;; empty within the unit this table was declared in, the unit
+               ;; name and a dot from anywhere else, with the import
+               ;; registered on the way past. An emitter writes
+               ;; `{unit}CASE_UPPER[{1}]` and never learns where it is being
+               ;; called from, which is the only way it could be right in
+               ;; both places.
+               (fill (str/replace (str tmpl) "{unit}" (qualified "")) args))))))))})
+
+(defn- array-literal
+  "`xs` as one array literal, wrapped at `per-line` and indented to `ctx`.
+
+  A thousand numbers on one line is a diff nobody reads, and the rule this
+  project holds is that generated code may not be worse than the hand-
+  written code it replaces -- which covers what a diff looks like as much as
+  what it compiles to."
+  [ctx open close per-line xs]
+  (if (<= (count xs) per-line)
+    (str open (str/join ", " xs) close)
+    (let [ind (kin/indent-of ctx)]
+      (str open "\n"
+           (str/join ",\n" (map (fn [row] (str ind "    " (str/join ", " row)))
+                                (partition-all per-line xs)))
+           "\n" ind close))))
+
+(defn flat-array
+  "The emitter for the common case: a flat sequence of numbers, with COUNT
+  and INDEX accessors.
+
+  Shipped with kin because most tables are this, and named rather than
+  defaulted because being named is what lets it STATE a convention instead
+  of guessing one. Its convention, in full:
+
+  * the data is a sequence of numbers; nested sequences are flattened, so a
+    table written as rows reads the same as one written flat;
+  * every accessor's FIRST parameter is the receiver and is ignored -- the
+    table is a module-level binding and needs none -- and the parameters
+    after it are INDICES;
+  * no index is the COUNT, and it emits as a literal, so a count accessor
+    costs nothing at run time and works even where the binding does not;
+  * one index reads that element;
+  * two indices read a record and a field within it, which needs `:stride`
+    on the declaration. `f` indexing a field within a stride-4 record is
+    exactly the thing no emitter could have guessed -- so it is said.
+
+  The ELEMENT TYPE comes from the tag on an indexing accessor, which is the
+  tag being a hint rather than a type: kin makes no claim that the data is
+  an array of `Cmp`, and this emitter chooses to lay it out as one."
+  [ctx {bound :binding :keys [data accessors options]}]
+  (let [xs (vec (flatten data))
+        _ (when-let [bad (first (remove number? xs))]
+            (throw (ex-info (str "kin.lang/flat-array: `" bound
+                                 "` holds " (pr-str bad) ", which is not a"
+                                 " number. This emitter lays out a flat"
+                                 " sequence of numbers; a table of anything"
+                                 " else wants an emitter that knows what it"
+                                 " is.")
+                            {:binding bound :value bad})))
+        stride (:stride options)
+        indexing (first (filter (fn [a] (> (:arity a) 1)) accessors))
+        elem (or (:ret-type indexing) (:ret-type (first accessors)))
+        _ (when-not elem
+            (throw (ex-info (str "kin.lang/flat-array: `" bound "` declares"
+                                 " no accessor, so nothing says what its"
+                                 " elements are.")
+                            {:binding bound})))
+        per-line (or stride 16)
+        n (count xs)
+        idx (fn [target]
+              ;; The index expression, in the argument slots `{1}` and `{2}`
+              ;; -- `{0}` is the receiver, which a module-level table has no
+              ;; use for.
+              (let [e (if stride (str "{1} * " stride " + {2}") "{1}")]
+                (if (= :rust target) (str "(" e ") as usize") e)))]
+    (doseq [{:keys [name arity]} accessors]
+      (when (zero? arity)
+        (throw (ex-info (str "kin.lang/flat-array: `" name "` takes no"
+                             " parameters. This emitter reads the first as"
+                             " the receiver and the rest as indices, so an"
+                             " accessor needs at least the receiver.")
+                        {:binding bound :accessor name})))
+      (when (> arity 3)
+        (throw (ex-info (str "kin.lang/flat-array: `" name "` takes " (dec arity)
+                             " indices. A flat array is indexed by one, or by"
+                             " a record and a field with `:stride`.")
+                        {:binding bound :accessor name :arity arity})))
+      (when (and (= 3 arity) (not stride))
+        (throw (ex-info (str "kin.lang/flat-array: `" name "` takes two"
+                             " indices -- a record and a field within it --"
+                             " and the declaration gives no `:stride`, so"
+                             " nothing says how wide a record is.")
+                        {:binding bound :accessor name}))))
+    (merge
+     (case (t ctx)
+       :rust {:type (str "[" elem "; " n "]")
+              :expr (array-literal ctx "[" "]" per-line xs)}
+       :java {:type (str elem "[]")
+              :expr (array-literal ctx "{" "}" per-line xs)}
+       :csharp {:type (str elem "[]")
+                :expr (array-literal ctx (str "new " elem "[] {") "}" per-line xs)}
+       (throw (ex-info (str "kin.lang/flat-array does not speak " (t ctx)
+                            " -- it lays a table out as an array literal, and"
+                            " that is a thing to say per language rather than"
+                            " to assume.")
+                       {:binding bound :target (t ctx)})))
+     {:accessors
+      (into {}
+            (for [{:keys [name arity]} accessors]
+              [name (if (= 1 arity)
+                      (str (if stride (quot n stride) n))
+                      (str "{unit}" bound "[" (idx (t ctx)) "]"))]))})))
 
 (defn forms
   "The shape forms. `:default-tag` is the tag an untagged name is given, which
@@ -832,6 +1387,11 @@
     '. field-form 'set (set-form (merge base-compound compound)) 'if if-form 'return return-form
     'comment comment-form 'doc doc-form
     'case case-form 'defconst defconst-form
+    ;; `defdata` -- a data table, generated into every target, with its
+    ;; accessors. See the block above `data-name`: the emitter is NAMED and
+    ;; comes out of the target map, and the declared signature is kin's
+    ;; contract rather than the emitter's.
+    'defdata (defdata-form default-tag)
     'local (local-form default-tag)
     'for (for-form default-tag) 'while while-form 'forever forever-form
     ;; `(declare foo bar)` -- a FORWARD REFERENCE within this namespace.

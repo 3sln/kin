@@ -263,10 +263,28 @@
   requiring `runtime.merge` goes down the identical path as requiring
   `flint.impl.rt`, so `:refer`, aliases, first-match-wins and the attribution
   in `source-origins` all work already. If this ever needs a second resolution path,
-  something has gone wrong."
-  [ns-name kinds]
-  (let [targets-of (fn [by-sym] (set (mapcat keys (vals by-sym))))
-        ;; A FORM dispatches on the target at CALL time, so an export built
+  something has gone wrong.
+
+  `targets` IS PASSED IN, and that is a correction rather than a tidy-up.
+  It used to be DERIVED -- the union of the targets that some exported form
+  or tag happened to have been registered under -- which reconstructs from
+  the wrong evidence a fact that is known directly, and gets it wrong in the
+  one case that matters. `:names` was not in that union at all, so a
+  namespace whose exports are ALL NAMES -- `^:pub defconst`s, or `defdata`
+  tables whose accessors are private -- exported perfectly good referable
+  names and reported that it could speak NO TARGET. Every dependent then
+  died with `generates for NO target`, naming the empty intersection rather
+  than the namespace that emptied it, and a defdata-only or defconst-only
+  module is the NATURAL shape for a data table: the table is its own
+  namespace and the code using it lives elsewhere.
+
+  What a namespace speaks is what it GENERATED FOR -- `:emit-for`, which
+  `analyse` computes from that namespace's own requires, `:kin/only` and
+  `:kin/exclude`. A namespace that exports nothing at all still speaks it.
+  The caller holds that set already, so asking for it deletes a derivation
+  rather than adding one."
+  [ns-name targets kinds]
+  (let [;; A FORM dispatches on the target at CALL time, so an export built
         ;; while generating one target is never used by another.
         forms (into {}
                     (for [[sym by-target] (clojure.core/get kinds :forms)]
@@ -284,8 +302,7 @@
         plain (fn [k] (into {} (for [[sym by-target] (clojure.core/get kinds k)]
                                  [sym (val (first by-target))])))]
     {:namespace ns-name
-     :targets (into (targets-of (clojure.core/get kinds :forms {}))
-                    (targets-of (clojure.core/get kinds :tags {})))
+     :targets (set targets)
      :forms forms
      :tags (plain :tags)
      :names (plain :names)}))
@@ -331,6 +348,82 @@
                                 " to write.")
                            {:source label :wants want :configured order})))
                  have)}))
+
+(defn declared-names
+  "Every name a source DEFINES, asked of the source rather than of its text.
+
+      {:forms #{...} :names #{...} :tags #{...}}
+
+  WHY THIS IS A FUNCTION AND NOT A `grep`. A consumer that has to know which
+  module defines a name -- to derive a static import for it, which is what
+  Java and C# need for a sibling call -- had no way to ask, so it read the
+  sources and matched on form HEADS: `#{'defn 'defconst}`, a list of the
+  declaration forms that existed on the day it was written.
+
+  That list is a restatement of the vocabulary, kept somewhere the
+  vocabulary cannot see, and it went stale the moment `defdata` shipped.
+  `defdata` was invisible to it, so a module that referred ONLY a table
+  accessor derived no import and emitted `CASE_FULL[i * 5 + 1]` against no
+  import at all -- code that compiles nowhere. A module that ALSO referred
+  one of the table's `defconst`s compiled, because the constant pulled the
+  import in; so the working case worked by accident, and the two were
+  indistinguishable from the outside.
+
+  The names a form defines are known to the FORM -- that is exactly what its
+  `:declare` slot exists to register -- so this runs the declare pass and
+  reports what was registered. Nothing is emitted and no target has to be
+  configured beyond the one being asked about. A declaration form added
+  tomorrow is covered the day it is written, with no consumer to update,
+  which is the property the head list could never have.
+
+  ASK THIS INSTEAD OF MATCHING HEADS. If a consumer is pattern-matching form
+  heads to learn what a source defines, it is maintaining a copy of the
+  vocabulary and this is the bug it will hit."
+  ([prj text] (declared-names prj text "<source>"))
+  ([prj text label]
+   (let [all (edn/read-string {:readers {}} (str "[" text "]"))
+         ns-form (first (filter #(and (seq? %) (= 'ns (first %))) all))
+         forms (vec (remove #(and (seq? %) (= 'ns (first %))) all))
+         vocabs (:vocabularies prj)
+         ;; DEPENDENCIES NEED NOT RESOLVE, and that is load-bearing rather
+         ;; than lenient. The caller deriving imports is running INSIDE the
+         ;; emit of the tree it is asking about, so requiring the whole DAG
+         ;; to be resolved first would make the question circular -- which is
+         ;; exactly why a consumer reached for a text scan instead. What a
+         ;; source DEFINES is a fact about the source alone; a require it
+         ;; cannot see yet can only affect what it REFERENCES.
+         known (when ns-form
+                 (cons 'ns (cons (second ns-form)
+                                 (for [f (drop 2 ns-form)]
+                                   (if (and (seq? f) (= :require (first f)))
+                                     (cons :require
+                                           (filter (fn [spec]
+                                                     (contains? vocabs
+                                                                (first (if (vector? spec) spec [spec]))))
+                                                   (rest f)))
+                                     f)))))
+         ;; ONE TARGET, because a declaration's NAMES do not vary by target
+         ;; -- only their spellings do, and the registries carry those per
+         ;; target already.
+         target (or (first (:target-order prj)) (first (keys (:targets prj))))
+         ctx (assoc (kin/context {} target)
+                    :vocabs vocabs
+                    :kin/ns (when ns-form (second ns-form))
+                    :scope-syms (when known (kin/require-scope known vocabs))
+                    :targets (:targets prj)
+                    :locals (atom {}) :names (atom {}) :local-tags (atom {}))
+         ;; NO `:exports`. This ANSWERS a question; it must not have the side
+         ;; effect of publishing anything into the project.
+         l (kin/map->LinkContext
+            (assoc (into {} ctx)
+                   :scope {} :indent 0
+                   :resolutions (kin/-resolutions ctx)
+                   :exports nil
+                   :locals (atom {}) :local-tags (atom {}) :names (atom {})))]
+     (kin/link! l (cons 'do forms))
+     {:forms (set (keys @(:locals l)))
+      :names (set (keys @(:names l)))
+      :tags (set (keys @(:local-tags l)))})))
 
 (defn whole-file?
   "Does `target` produce a whole FILE rather than a region?
@@ -460,10 +553,16 @@
              ;; The namespace is finished, so what it made public IS a
              ;; vocabulary now. Every later namespace resolves against it the
              ;; same way it resolves a hand-written one.
+             ;;
+             ;; WHAT IT SPEAKS IS WHAT IT GENERATED FOR, handed over rather
+             ;; than reconstructed from what it happened to export. A
+             ;; namespace of nothing but data tables and constants exports
+             ;; only NAMES, and used to report that it spoke nothing.
              (assoc :project
                     (cond-> prj
                       ns (assoc-in [:vocabularies (second ns)]
-                                   (export-vocabulary (second ns) @exports)))))))
+                                   (export-vocabulary (second ns) (:emit-for a)
+                                                      @exports)))))))
      {:order [] :generated {} :project prj}
      order)))
 
