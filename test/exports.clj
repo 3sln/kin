@@ -21,6 +21,13 @@
 ;;      namespace dependencies form a DAG
 ;;   6. `declare-form!` allows a forward reference WITHIN a namespace, and
 ;;      throws if used before it is defined -- clojure.core/declare exactly
+;;   7. a reference into another UNIT is qualified and registers its import,
+;;      and one within the unit is bare -- the same code path both times
+;;   8. a NAME does all of that too. It could not: a name was a per-target
+;;      string, so a `defconst` read from another module came out bare with no
+;;      import and compiled only where something else derived the import by
+;;      scanning the sources. A plain string still means `no linking`, which
+;;      is what a vocabulary's names are and what they stay.
 (require '[kin] '[kin.lang :as core] '[kin.target]
          '[kin.vfs :as vfs] '[kin.project :as kp] '[clojure.string :as str])
 
@@ -31,7 +38,20 @@
   {:namespace 'demo
    :targets #{:rust :java}
    :tags {'I32 I32 'Rt Rt*}
-   :names {}
+   ;; A PER-TARGET STRING, which is what a vocabulary's names are and what
+   ;; the tree consuming kin has a hundred and forty-eight of. It means
+   ;; `spell it this way, there is nothing to link` -- the truth for a name
+   ;; every target declares in its own header -- and section 8 pins that
+   ;; teaching names to link did not change it.
+   :names {'TY_STR {:rust "TY_STR" :java "TY_STR"}
+           ;; AND ONE THAT LINKS, written by hand. The door a `defconst`
+           ;; goes through is open to a vocabulary too -- a constant that
+           ;; lives in a hand-written header the generated file has to
+           ;; import is the same shape as one another module declares.
+           ;; `check-vocabulary` demands a spelling per target and cannot
+           ;; ask a function for one, so it exempts a function: it answers
+           ;; for every target by construction, at the reference.
+           'HOSTED (fn [ctx] (core/need! ctx "Header") "HOSTED")}
    :forms (core/forms {:default-tag I32})})
 
 ;; `a` exports `twice` and keeps `hidden` to itself. `b` requires `a` and
@@ -122,24 +142,37 @@
 ;; qualified; one that pushes nothing gets nil on both sides and self-
 ;; references always -- which is why a project generating regions sees no
 ;; change at all. Both are the same code path asking the same question.
-(let [unit-of (fn [ns-name] (str/capitalize (last (str/split (name ns-name) #"\."))))
-      unit-java (merge kin.target/java
-                       {:unit unit-of
-                        :emit (fn [ctx forms]
-                                (let [ns-name (second (first (filter #(and (seq? %) (= 'ns (first %))) forms)))
-                                      cls (unit-of ns-name)
-                                      needs (atom #{})]
-                                  (kin/scoped
-                                   ctx {:key :kin/unit :value cls}
-                                   (fn [i1]
-                                     (kin/scoped
-                                      i1 {:key :needs :value needs}
-                                      (fn [inner]
-                                        (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
-                                          (kin/statement! inner f))))))
-                                  (kin/emit! ctx (str "// needs: "
-                                                      (str/join "," (sort @needs)) "\n"))))})
-      up (kp/resolve-exports
+(defn unit-of
+  "Which UNIT a namespace is emitted into: `s.a` -> `A`."
+  [ns-name]
+  (str/capitalize (last (str/split (name ns-name) #"\."))))
+
+(def unit-java
+  "A target that opens a UNIT and collects what its forms need.
+
+  The three things a linking target does, and nothing else: it says how a
+  namespace becomes a unit (`:unit`), it pushes the unit it is opening
+  (`:kin/unit`), and it puts an atom where references can say what they need
+  (`:needs`). What lands in that atom is what a header would be written from,
+  so printing it is enough to see whether a reference registered anything."
+  (merge kin.target/java
+         {:unit unit-of
+          :emit (fn [ctx forms]
+                  (let [ns-name (second (first (filter #(and (seq? %) (= 'ns (first %))) forms)))
+                        cls (unit-of ns-name)
+                        needs (atom #{})]
+                    (kin/scoped
+                     ctx {:key :kin/unit :value cls}
+                     (fn [i1]
+                       (kin/scoped
+                        i1 {:key :needs :value needs}
+                        (fn [inner]
+                          (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
+                            (kin/statement! inner f))))))
+                    (kin/emit! ctx (str "// needs: "
+                                        (str/join "," (sort @needs)) "\n"))))}))
+
+(let [up (kp/resolve-exports
           (kp/project {:vocabularies [vocabulary]
                         :targets {:java unit-java}
                         :target-order [:java]
@@ -154,6 +187,150 @@
   ;; And the form contributed what it needs, as data, to the header.
   (is "7. and the cross-unit call registered its import" true
       (str/includes? out "// needs: A")))
+
+;; ---------------------------------------------------------------------------
+;; 8. A NAME LINKS TOO -- and until now it could not.
+;;
+;; A form reference went through `declared-call`: it knew which module
+;; declared the thing, asked the target how a cross-unit reference is spelled,
+;; and fired `need!` so the header could carry the import. A NAME reference
+;; was a lookup in a map of per-target strings, so it knew none of that and
+;; could register nothing. A `defconst` in another module came out as a bare
+;; word with no import -- which does not resolve, and compiled only where the
+;; project ALSO derived its imports by scanning every source for the names it
+;; defines. The reference itself contributed nothing.
+;;
+;; So a name registers a FUNCTION now, asked at the reference. It is the same
+;; qualifier `declared-call` asks, out of the same place: bare within the
+;; unit, qualified outside it, `need!` either way.
+
+(def const-sources
+  {"k.kin"
+   ;; The constant, and a use of it in its OWN unit -- which must stay bare.
+   "(ns s.k (:require [demo :refer [defn defconst return I32 Rt]]))
+    (defconst ^:pub ^I32 LIMIT 200)
+    (defn ^:pub ^:method ^I32 own [^Rt rt] (return LIMIT))"
+
+   "m.kin"
+   ;; The reference from ANOTHER unit -- the flint shape exactly: `casemap`
+   ;; refers `CASE_UPPER_LEN` from `casetable`, and the emitted Java said a
+   ;; bare `CASE_UPPER_LEN` with no import.
+   "(ns s.m (:require [demo :refer [defn return I32 Rt TY_STR]]
+                      [s.k :refer [LIMIT]]))
+    (defn ^:pub ^:method ^I32 cap [^Rt rt ^I32 x] (return LIMIT))"
+
+   "w.kin"
+   ;; ONLY a vocabulary name, in its own file, so that what its reference
+   ;; registers can be read off the header with nothing else in it. Asking
+   ;; the same question inside `m.kin` cannot answer it: the constant's
+   ;; import is in that header too, so the line is non-empty either way.
+   "(ns s.w (:require [demo :refer [defn return I32 Rt TY_STR HOSTED]]))
+    (defn ^:pub ^:method ^I32 vocab [^Rt rt] (return TY_STR))"
+
+   "h.kin"
+   "(ns s.h (:require [demo :refer [defn return I32 Rt HOSTED]]))
+    (defn ^:pub ^:method ^I32 hosted [^Rt rt] (return HOSTED))"})
+
+(let [up (kp/resolve-exports
+          (kp/project {:vocabularies [vocabulary]
+                       :targets {:java unit-java}
+                       :target-order [:java]
+                       :sources {:vfs (vfs/memory-vfs const-sources)
+                                 :match "*.kin"}}))
+      out (:java (kp/generate up (get const-sources "m.kin") "m.kin"))
+      own (:java (kp/generate up (get const-sources "k.kin") "k.kin"))
+      voc (:java (kp/generate up (get const-sources "w.kin") "w.kin"))
+      hos (:java (kp/generate up (get const-sources "h.kin") "h.kin"))]
+  (is "8. a constant read from ANOTHER unit is qualified" true
+      (str/includes? out "return K.LIMIT;"))
+  ;; THE ASSERTION THIS WAS BUILT FOR. The spelling above could be argued
+  ;; about -- a project using static imports wants the name bare -- but the
+  ;; import cannot: whatever it is spelled, the reference leaves the unit and
+  ;; something has to say so. Before this, nothing did.
+  (is "8. and it registered the import the reference needs" true
+      (str/includes? out "// needs: K"))
+  ;; BACKWARD COMPATIBILITY, stated as a test rather than as an intention. A
+  ;; vocabulary's name is a per-target string, it is spelled verbatim, and it
+  ;; registers nothing -- there is no module it belongs to.
+  (is "8. a vocabulary's plain per-target name is unchanged" true
+      (str/includes? voc "return TY_STR;"))
+  (is "8. and needs NOTHING -- a plain string is not a link" true
+      (str/includes? voc "// needs: \n"))
+  ;; The constant's import is the ONLY thing in this header: a reference
+  ;; registers what it needs and nothing more.
+  (is "8. and the linking reference registered exactly one thing" true
+      (str/includes? out "// needs: K\n"))
+  ;; A HAND-WRITTEN VOCABULARY MAY CARRY A LINKING NAME too. This one spells
+  ;; itself and asks for a header, which a per-target string could not do --
+  ;; and `check-vocabulary`, which demands a spelling per target, let it
+  ;; through rather than refusing what it cannot read.
+  (is "8. a vocabulary's name may LINK as well, and is not refused for it"
+      [true true]
+      [(str/includes? hos "return HOSTED;")
+       (str/includes? hos "// needs: Header\n")])
+  ;; And within its own unit the same constant is bare, with nothing needed.
+  (is "8. the declaring unit's own use of it is bare" true
+      (and (str/includes? own "return LIMIT;")
+           (not (str/includes? own "K.LIMIT"))))
+  (is "8. and its own file imports nothing for it" true
+      (str/includes? own "// needs: \n")))
+
+;; ONE EXPORTED VALUE, EVERY TARGET. A name is recorded per target as it is
+;; generated and read back as ONE value -- `export-vocabulary` keeps the first
+;; and drops the rest, because a name was data and the data was the same
+;; whichever target was being emitted when it was recorded. A function has to
+;; survive that, so it closes over the NAMESPACE and asks the target for the
+;; unit at the reference rather than baking one in.
+;;
+;; The two targets are given DIFFERENT unit conventions on purpose: `K` and
+;; `k`. A value that had captured one target's answer would register the other
+;; target's import here, and both spellings below would still look plausible.
+(let [rust-unit (fn [ns-name] (str/lower-case (last (str/split (name ns-name) #"\."))))
+      unit-rust (merge kin.target/rust
+                       {:unit rust-unit
+                        :emit (fn [ctx forms]
+                                (let [ns-name (second (first (filter #(and (seq? %) (= 'ns (first %))) forms)))
+                                      needs (atom #{})]
+                                  (kin/scoped
+                                   ctx {:key :kin/unit :value (rust-unit ns-name)}
+                                   (fn [i1]
+                                     (kin/scoped
+                                      i1 {:key :needs :value needs}
+                                      (fn [inner]
+                                        (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
+                                          (kin/statement! inner f))))))
+                                  (kin/emit! ctx (str "// needs: "
+                                                      (str/join "," (sort @needs)) "\n"))))})
+      both (kp/resolve-exports
+            (kp/project {:vocabularies [vocabulary]
+                         :targets {:java unit-java :rust unit-rust}
+                         :target-order [:rust :java]
+                         :sources {:vfs (vfs/memory-vfs const-sources)
+                                   :match "*.kin"}}))
+      out (kp/generate both (get const-sources "m.kin") "m.kin")]
+  (is "8. one exported name still answers each target its own way"
+      [true true]
+      [(str/includes? (:java out) "return K.LIMIT;")
+       ;; Rust qualifies nothing by default -- a crate reaches a sibling
+       ;; through a `use`, which is what the import IS here.
+       (str/includes? (:rust out) "return LIMIT;")])
+  (is "8. and each registers ITS OWN target's unit, not the other's"
+      [true true]
+      [(str/includes? (:java out) "// needs: K\n")
+       (str/includes? (:rust out) "// needs: k\n")]))
+
+;; A NAME REACHED FROM A NAMESPACE WITH NO UNITS AT ALL is bare and registers
+;; nothing -- the same answer a call gets, and the reason a project that
+;; splices regions sees no change from any of this.
+(let [plain (kp/resolve-exports
+             (kp/project {:vocabularies [vocabulary]
+                          :targets {:java kin.target/java}
+                          :target-order [:java]
+                          :sources {:vfs (vfs/memory-vfs const-sources)
+                                    :match "*.kin"}}))
+      out (:java (kp/generate plain (get const-sources "m.kin") "m.kin"))]
+  (is "8. a target that names no `:unit` gets the bare spelling" true
+      (str/includes? out "return LIMIT;")))
 
 ;; 5. A REQUIRE CYCLE IS REFUSED, naming the loop. kin follows Clojure:
 ;; namespace dependencies form a DAG. Two namespaces that call each other are

@@ -602,6 +602,34 @@
         (get-in ctx [:vocabs vname :tags k]))
       (get-in ctx [:tags sym]))))
 
+(defn spell-name
+  "What a registered NAME comes out as HERE, or nil if there is no entry.
+
+  TWO SHAPES, and the plain one is the common one.
+
+  A MAP of per-target strings -- `{:rust \"TY_STR\" :java \"TY_STR\" :csharp
+  \"TyStr\"}` -- says `spell it this way, and there is nothing to link`. That
+  is the truth for every name each target declares locally: a type tag out of
+  a hand-written header is in scope wherever the header is, and a reference to
+  it owes nobody anything.
+
+  A FUNCTION `(fn [ctx] -> String)` says `ask me, at the reference`. It is
+  handed the context the reference is being emitted in, so it can see which
+  unit is open, spell itself bare or qualified accordingly, and `need!` an
+  import on the way past -- which is what a name a MODULE declares has to do
+  and what a string could not do at all. A `defconst` in another namespace was
+  emitted as a bare word with no import, and compiled only where something
+  ELSE happened to derive the import by scanning the sources.
+
+  kin CALLS IT AND CARRIES THE ANSWER. What it decides -- qualified or bare,
+  and what it registers -- is the declaring vocabulary's business, the same
+  way a form's callable is."
+  [ctx entry]
+  (cond
+    (nil? entry) nil
+    (fn? entry) (entry ctx)
+    :else (clojure.core/get entry (:target ctx))))
+
 (defn vocab-name
   "How a VOCABULARY spells `sym` for this target, through the require scope.
 
@@ -615,7 +643,7 @@
   [ctx sym]
   (when-let [scope (:scope-syms ctx)]
     (when-let [[vname k] (clojure.core/get scope sym)]
-      (get-in ctx [:vocabs vname :names k (:target ctx)]))))
+      (spell-name ctx (get-in ctx [:vocabs vname :names k])))))
 
 (def ^:private registries
   "Where each KIND of definition is kept, locally and for export.
@@ -1221,7 +1249,14 @@
   (cond
     (string? v) (pr-str v)
     (symbol? v) (or (vocab-name ctx v)
-                    (get-in (some-> (:names ctx) deref) [v (:target ctx)])
+                    ;; THE FILE'S OWN NAMES, through the same door. A name
+                    ;; registered here by a `defconst` in THIS file and one
+                    ;; reaching in from another namespace's exports are the
+                    ;; same kind of thing, so they are spelled by the same
+                    ;; function -- otherwise the linking half works across
+                    ;; namespaces and silently does not work within one.
+                    (spell-name ctx (clojure.core/get
+                                     (some-> (:names ctx) deref) v))
                     (when (constant-shaped? v)
                       (throw (ex-info
                               (str "kin: `" v "` is constant-shaped but is not a"
@@ -1330,7 +1365,13 @@
                           {:vocabulary nm :tag sym :target t
                            :types (:types tag)}))))
       ;; And a name a spelling.
-      (doseq [[sym spellings] (:names v) t targets]
+      ;;
+      ;; A FUNCTION ANSWERS FOR EVERY TARGET BY CONSTRUCTION -- it is asked at
+      ;; the reference, where the target is known -- so there is nothing here
+      ;; to check. This is the same exemption forms have and for the same
+      ;; reason: what cannot be read as data is checked when it is asked.
+      (doseq [[sym spellings] (:names v) t targets
+              :when (not (fn? spellings))]
         (when-not (clojure.core/get spellings t)
           (throw (ex-info (str who " speaks " t " but its name `" sym "` has no"
                                " spelling for it. Passing a name through"

@@ -18,7 +18,10 @@
 ;;      through. No new mechanism.
 ;;   3. AN ACCESSOR IS AN ORDINARY BINDING. It is `defn`'s own call machinery,
 ;;      so `:refer` across namespaces, a sibling module's qualified call and
-;;      the import that call needs all work without being reimplemented.
+;;      the import that call needs all work without being reimplemented. AND
+;;      SO IS THE TABLE'S OWN NAME, which is the half that could not link: it
+;;      was a per-target string, so a source naming `CASE_UPPER` directly got
+;;      a bare word and no import.
 ;;   4. THE DECLARED SIGNATURE IS KIN'S CONTRACT. An emitter satisfies the
 ;;      declared accessors and arity; it cannot add one, drop one, or read an
 ;;      argument that does not exist.
@@ -258,23 +261,31 @@
 ;; a cross-unit reference QUALIFIED, and the import registered -- which is
 ;; `defn`'s rule, applied to the emitter's `{unit}` placeholder. A target that
 ;; pushes no frame gets nil on both sides and bare references always.
-(let [unit-of (fn [ns-name] (str/capitalize (last (str/split (name ns-name) #"\."))))
-      unit-java (merge (target-with kin.target/java)
-                       {:unit unit-of
-                        :emit (fn [ctx forms]
-                                (let [ns-name (second (first (filter #(and (seq? %) (= 'ns (first %))) forms)))
-                                      needs (atom #{})]
-                                  (kin/scoped
-                                   ctx {:key :kin/unit :value (unit-of ns-name)}
-                                   (fn [i1]
-                                     (kin/scoped
-                                      i1 {:key :needs :value needs}
-                                      (fn [inner]
-                                        (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
-                                          (kin/statement! inner f))))))
-                                  (kin/emit! ctx (str "// needs: "
-                                                      (str/join "," (sort @needs)) "\n"))))})
-      up (kp/resolve-exports
+(defn unit-of
+  "Which UNIT a namespace is emitted into: `s.a` -> `A`."
+  [ns-name]
+  (str/capitalize (last (str/split (name ns-name) #"\."))))
+
+(def unit-java
+  "A target that opens a UNIT and collects what its forms need, so that what
+  a reference registered can be read straight off the header."
+  (merge (target-with kin.target/java)
+         {:unit unit-of
+          :emit (fn [ctx forms]
+                  (let [ns-name (second (first (filter #(and (seq? %) (= 'ns (first %))) forms)))
+                        needs (atom #{})]
+                    (kin/scoped
+                     ctx {:key :kin/unit :value (unit-of ns-name)}
+                     (fn [i1]
+                       (kin/scoped
+                        i1 {:key :needs :value needs}
+                        (fn [inner]
+                          (doseq [f (remove #(and (seq? %) (= 'ns (first %))) forms)]
+                            (kin/statement! inner f))))))
+                    (kin/emit! ctx (str "// needs: "
+                                        (str/join "," (sort @needs)) "\n"))))}))
+
+(let [up (kp/resolve-exports
           (kp/project {:vocabularies [vocabulary]
                        :targets {:java unit-java}
                        :target-order [:java]
@@ -290,6 +301,37 @@
     (is "3. the declaring unit's own file has no qualifier to add" true
         (and (str/includes? own "public static final int[] CASE_UPPER = {")
              (not (str/includes? own "A.CASE_UPPER"))))))
+
+;; AND THE TABLE'S OWN NAME, which is the half that could not link.
+;;
+;; An accessor was an ordinary binding already -- `declared-call` -- but the
+;; BINDING it reads was registered as a map of per-target strings and looked
+;; up as one. So a source naming `CASE_UPPER` directly, which is the whole
+;; point of emitting a binding rather than only accessors, got a bare word
+;; and no import: the same defect a `defconst` had, in the same declaration.
+;; It registers the same linking value now, so both halves of one `defdata`
+;; answer the same way.
+;;
+;; Its OWN file is the source of the table and the only other file is this
+;; one, so the header here holds exactly what this reference asked for.
+(def naming-sources
+  {"a.kin" (get sources "a.kin")
+   "c.kin"
+   "(ns s.c (:require [demo :refer [defn return I32 Rt]]
+                      [s.a :refer [case-upper]]))
+    (defn ^:pub ^:method ^I32 whole [^Rt rt] (return case-upper))"})
+
+(let [up (kp/resolve-exports
+          (kp/project {:vocabularies [vocabulary]
+                       :targets {:java unit-java}
+                       :target-order [:java]
+                       :sources {:vfs (vfs/memory-vfs naming-sources)
+                                 :match "*.kin"}}))
+      out (:java (kp/generate up (get naming-sources "c.kin") "c.kin"))]
+  (is "3. naming the TABLE from another unit qualifies it" true
+      (str/includes? out "return A.CASE_UPPER;"))
+  (is "3. and that reference alone registered the import" true
+      (str/includes? out "// needs: A\n")))
 
 ;; A MODULE WITH NO `defn` IN IT AT ALL. This is the natural shape -- a data
 ;; table is its own namespace and the code that uses it lives elsewhere -- and

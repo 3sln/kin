@@ -191,6 +191,16 @@
 
 (defn- ty-of [ctx default tag] (get-in (or (kin/tag ctx tag) default) [:types (t ctx)]))
 
+(defn- unit-of
+  "The unit `ns-sym` is emitted into for THIS target, or nil.
+
+  A function of the namespace alone, which is what makes it askable from a
+  reference in a different file: the answer does not depend on what frame is
+  open, only on which namespace declared the thing and which target is being
+  written. A target that names no `:unit` has no units, and gets nil."
+  [ctx ns-sym]
+  (when-let [f (get-in ctx [:targets (t ctx) :unit])] (f ns-sym)))
+
 (defn- home-unit
   "The unit a target would open for the namespace being emitted, or nil.
 
@@ -199,9 +209,7 @@
   frame exists. A target computes it from the namespace exactly as it
   computes `:path`, so the two sides agree by construction."
   [ctx]
-  (or (kin/get ctx :kin/unit)
-      (when-let [f (get-in ctx [:targets (t ctx) :unit])]
-        (f (:kin/ns ctx)))))
+  (or (kin/get ctx :kin/unit) (unit-of ctx (:kin/ns ctx))))
 
 (defn- default-cross-unit
   "How a cross-unit reference is spelled when the target says nothing.
@@ -214,6 +222,70 @@
   change."
   [ctx home nm]
   (if (= :rust (t ctx)) nm (str home "." nm)))
+
+(defn- qualifier
+  "How a reference emitted in `c` must spell something `home` declares.
+
+  `(fn [nm-str] -> String)`, and it is the WHOLE of what crossing a unit
+  boundary means: bare within the unit, whatever the target spells a
+  cross-unit reference as from outside it, and the import registered either
+  way. Everything that has a home and can be referred asks this -- a `defn`
+  call, a `defdata` accessor's template, and a NAME.
+
+  IT IS NOT PART OF `declared-call`, and separating them is the point. A call
+  RENDERS ARGUMENTS AND EMITS; a name is a word inside somebody else's
+  expression and can do neither. What the two actually share is this
+  question, so this is what is shared -- a second copy of it is how the name
+  half came to be missing the import in the first place."
+  [c home]
+  (let [here (kin/get c :kin/unit)
+        ;; A RUST METHOD IS THE SAME EVERYWHERE: both halves are methods on
+        ;; one type, and a crate may have several inherent `impl` blocks. So
+        ;; `elsewhere?` only bites in the two languages that put a function
+        ;; inside a class.
+        elsewhere? (and home here (not= home here))]
+    ;; THE IMPORT AND THE PREFIX ARE TWO QUESTIONS, and welding them
+    ;; together was a mistake. `need!` answers `this reference leaves
+    ;; the unit`, which is true whatever the spelling; the prefix
+    ;; answers `and this target writes that as ...`, which is the
+    ;; target's business. A language that reaches a sibling through a
+    ;; STATIC IMPORT wants the name bare AND the import registered --
+    ;; `import static com.example.Casetable.*;` with `CASE_FULL[i]` in
+    ;; the body -- and while the two were one branch that combination
+    ;; could not be expressed at all. `:cross-unit` is asked of the
+    ;; target the same way `:unit` and `:local-name` are.
+    (fn [nm-str]
+      (if elsewhere?
+        (do (need! c home)
+            ((get-in c [:targets (t c) :cross-unit] default-cross-unit)
+             c home nm-str))
+        nm-str))))
+
+(defn- declared-name
+  "The value a DECLARATION registers for a NAME it owns -- a constant, a data
+  table's binding.
+
+  This is `declared-call`'s other half, and it exists because a NAME COULD
+  NOT LINK. A name used to be registered as a map of per-target strings and
+  looked up as one, so `CASE_UPPER_LEN` -- a `defconst` in another module --
+  came out as a bare word with no import, in a language where that does not
+  resolve. It compiled only where the project ALSO derived its imports by
+  scanning every source for the names it defines; the reference itself
+  contributed nothing, and a project without that scanner got code that could
+  not build.
+
+  So a name registers a FUNCTION, which `kin/spell-name` asks at the
+  reference. It closes over two things that do not vary by target -- the
+  namespace that declared it, and how each target spells it -- and computes
+  the unit at the reference, so ONE value is right for every target and for
+  every file that refers it. That is what lets it survive the export path,
+  where a name is recorded per target and read back as one value.
+
+  A per-target STRING still means exactly what it always did: spell it this
+  way, there is nothing to link. That is the right answer for a name every
+  target declares locally, and it is the shape a vocabulary writes."
+  [{:keys [ns spellings]}]
+  (fn [c] ((qualifier c (unit-of c ns)) (get spellings (t c)))))
 
 (defn- declared-call
   "The callable a DECLARATION registers under its own name.
@@ -243,29 +315,7 @@
     ;; arrives and the one the sources already pay for.
     (kin/tagged! c (kin/tag c ret))
     (let [as (mapv (fn [x] (kin/render c x)) (rest f))
-          here (kin/get c :kin/unit)
-          ;; A RUST METHOD IS THE SAME EVERYWHERE: both halves are methods
-          ;; on one type, and a crate may have several inherent `impl`
-          ;; blocks. So `elsewhere?` only bites in the two languages that put
-          ;; a function inside a class.
-          elsewhere? (and home here (not= home here))
-          ;; THE IMPORT AND THE PREFIX ARE TWO QUESTIONS, and welding them
-          ;; together was a mistake. `need!` answers `this reference leaves
-          ;; the unit`, which is true whatever the spelling; the prefix
-          ;; answers `and this target writes that as ...`, which is the
-          ;; target's business. A language that reaches a sibling through a
-          ;; STATIC IMPORT wants the name bare AND the import registered --
-          ;; `import static com.example.Casetable.*;` with `CASE_FULL[i]` in
-          ;; the body -- and while the two were one branch that combination
-          ;; could not be expressed at all. `:cross-unit` is asked of the
-          ;; target the same way `:unit` and `:local-name` are.
-          qualify (fn [nm-str]
-                    (if elsewhere?
-                      (do (need! c home)
-                          ((get-in c [:targets (t c) :cross-unit] default-cross-unit)
-                           c home nm-str))
-                      nm-str))
-          code (spell c qualify as)]
+          code (spell c (qualifier c home) as)]
       (if (= :statement (kin/position c))
         (kin/emit! c (kin/indent-of c) code ";\n")
         (kin/emit! c code)))))
@@ -891,6 +941,17 @@
   [nm]
   (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))
 
+(defn- const-reference
+  "What a reference to this constant becomes, wherever it is written.
+
+  A constant belongs to the MODULE that declares it, so a reference to one
+  from another unit is qualified and imported exactly as a call to a `defn`
+  in that module is -- `defn`'s rule, applied to the thing `defn`'s rule
+  could not reach. Pure in the same way `const-spellings` is, so `:declare`
+  and `:generate` register the identical value."
+  [ctx nm]
+  (declared-name {:ns (:kin/ns ctx) :spellings (const-spellings nm)}))
+
 (defn- defconst-generate
   "A named constant. `^:pub` when it is part of the API."
   [ctx form]
@@ -915,7 +976,7 @@
        :java (str "public static final " ty " " cn " = " lit ";\n")
        :csharp (str (if pub? "public " "internal ") "const " ty " " cn " = " lit ";\n")))
     (kin/define-name!
-     ctx {:scope (if pub? :public :private)} nm (const-spellings nm))))
+     ctx {:scope (if pub? :public :private)} nm (const-reference ctx nm))))
 
 (def ^:private defconst-form
   "TWO SLOTS, for the reason `defn` has two.
@@ -931,7 +992,7 @@
                 (check-const-name! ctx nm)
                 (kin/define-name!
                  ctx {:scope (if (:pub (meta nm)) :public :private)}
-                 nm (const-spellings nm))))
+                 nm (const-reference ctx nm))))
    :generate defconst-generate})
 
 ;; --------------------------------------------------------------- defdata
@@ -994,6 +1055,23 @@
     (if (= :csharp target)
       (str/join (mapv str/capitalize parts))
       (str/join "_" (mapv str/upper-case parts)))))
+
+(defn- table-reference
+  "What a reference to the TABLE ITSELF becomes, wherever it is written.
+
+  The accessors were already ordinary bindings -- `declared-call`, and the
+  qualifier with them. The binding they read was not: a source naming
+  `CASE_UPPER` directly, which is the whole point of emitting one, got a bare
+  word and no import. Same rule for both halves of one declaration now, out
+  of the same function.
+
+  The target list is the project's when there is one, so a fourth target gets
+  a spelling without this knowing its name."
+  [ctx nm]
+  (declared-name
+   {:ns (:kin/ns ctx)
+    :spellings (reduce (fn [m tg] (assoc m tg (data-name tg nm))) {}
+                       (or (seq (keys (:targets ctx))) [:rust :java :csharp]))}))
 
 (defn- declaration-opts
   "A `defdata`'s optional docstring and its option map.
@@ -1185,9 +1263,7 @@
        ;; to derive an import from it, say -- must get the same answer
        ;; before emission as after, and the spelling is pure.
        (kin/define-name!
-        ctx {:scope (if pub? :public :private)} nm
-        (reduce (fn [m tg] (assoc m tg (data-name tg nm))) {}
-                (or (seq (keys (:targets ctx))) [:rust :java :csharp])))
+        ctx {:scope (if pub? :public :private)} nm (table-reference ctx nm))
        (doseq [a-nm (keys accessors)]
          (kin/define-form!
           ctx {:scope (if (or pub? (:pub (meta a-nm))) :public :private)}
@@ -1243,9 +1319,7 @@
                          " only `:accessors` needs no spelling.")
                     {:form nm :target (t ctx)}))))
          (kin/define-name!
-          ctx {:scope (if pub? :public :private)} nm
-          (reduce (fn [m tg] (assoc m tg (data-name tg nm))) {}
-                  (or (seq (keys (:targets ctx))) [:rust :java :csharp]))))
+          ctx {:scope (if pub? :public :private)} nm (table-reference ctx nm)))
        ;; A HELPER THE EMITTER CONTRIBUTED. Where an accessor cannot be a
        ;; one-line expansion, the emitter writes the body once, into the
        ;; module, and has its template call it.
