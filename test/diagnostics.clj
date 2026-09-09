@@ -158,7 +158,7 @@
 (is "report: every source and every vocabulary, with what each can speak"
     [["broken.kin" "everywhere.kin" "narrow.kin" "nowhere.kin" "only.kin"]
      {'narrow {:targets #{:rust} :forms 1 :tags 1 :names 0}
-      'wide {:targets #{:rust :java} :forms 37 :tags 2 :names 0}}]
+      'wide {:targets #{:rust :java} :forms 39 :tags 2 :names 0}}]
     [(:sources r) (into {} (:vocabularies r))])
 
 ;; ONE LIST, ACROSS KINDS. The two bugs this file is about are found by two

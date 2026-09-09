@@ -697,6 +697,28 @@
         (swap! a assoc sym v)))
     (when (= :public scope)
       (when-let [a (:exports ctx)] (swap! a assoc-in [export sym] v)))
+    ;; PAYING WHAT THIS NAMESPACE OWES. Another namespace may have declared
+    ;; this name with `(declarefn me/sym)` and be holding a placeholder for
+    ;; it. Filling their atom is what lets their promise settle -- the same
+    ;; `reset!` a local `defn` does one scope up, reaching across the file
+    ;; boundary because the declaration said it would.
+    ;;
+    ;; PUBLIC ONLY. A private definition is not something another namespace
+    ;; could have named, so an unfilled debt against one is a declaration
+    ;; naming something that is not exported -- caught at join, where it can
+    ;; say so.
+    (when (= :public scope)
+      (let [k [(:target ctx) (:kin/ns ctx) kind sym]]
+        ;; PAY WHAT IS ALREADY OWED, and RECORD THE PAYMENT for a debt not
+        ;; yet incurred. Generation order between two namespaces that declare
+        ;; from each other is arbitrary -- neither requires the other, so
+        ;; nothing orders them -- and the definition may run either before or
+        ;; after the declaration that wants it. Handling only one direction
+        ;; works exactly half the time, and which half depends on how the
+        ;; labels happened to sort.
+        (when-let [reg (:kin/owed ctx)]
+          (doseq [d (clojure.core/get @reg k)] (reset! (:filled d) v)))
+        (when-let [paid (:kin/paid ctx)] (swap! paid assoc k v))))
     nil))
 
 (defn- placeholder
@@ -730,18 +752,52 @@
   and the promise settles the moment the definition lands.
 
   Two mutually recursive functions in ONE namespace need this, the same way
-  Clojure does. ACROSS namespaces it is neither needed nor available --
-  namespace dependencies form a DAG, so everything a namespace requires is
-  already emitted in full by the time it starts, and the only unsettled nodes
-  at join are local ones."
+  Clojure does.
+
+  ACROSS NAMESPACES, a QUALIFIED symbol declares from somewhere else:
+
+      (declarefn flint.rt.valeq/val-eq)
+
+  which reserves the BARE name here and records that `flint.rt.valeq` owes it.
+  This is the one thing a `:require` cannot express, because a require is a
+  dependency edge and these two namespaces genuinely need each other -- a
+  map's lookup compares keys, and comparing two maps looks keys up. The
+  declaration is not a way around the DAG rule; it is the statement that this
+  pair is not a DAG, made where a reader of either half will see it.
+
+  IT IS THE SAME MECHANISM EITHER WAY. `available?` answers false for an
+  unfilled placeholder, so the call defers into a promise exactly as a local
+  forward reference does. What differs is only WHO fills it: a later `defn`
+  in this file, or the other namespace when it is generated."
   [ctx kind opts sym]
-  (let [filled (atom nil)]
-    (define! ctx kind opts sym (with-meta (placeholder kind sym filled)
-                                 {:kin/pending filled}))
+  (let [filled (atom nil)
+        from (when (namespace sym) (symbol (namespace sym)))
+        local (if from (symbol (name sym)) sym)]
+    (define! ctx kind opts local (with-meta (placeholder kind local filled)
+                                   {:kin/pending filled}))
+    (when from
+      ;; ALREADY DEFINED? Then there is nothing to wait for: fill the
+      ;; placeholder now and the call emits inline, exactly as an ordinary
+      ;; require would have.
+      (when-let [v (clojure.core/get @(or (:kin/paid ctx) (atom {}))
+                                     [(:target ctx) from kind local])]
+        (reset! filled v))
+      (when-let [reg (:kin/owed ctx)]
+        ;; KEYED BY TARGET, because a debt is a debt in ONE language. Each
+        ;; target renders in its own context with its own registries, so
+        ;; `s.p` declaring `s.q/odd` makes three separate placeholders --
+        ;; and what fills the Rust one is `s.q`'s RUST definition, whose
+        ;; call shape is `self.odd(..)` and not `Q.odd(rt, ..)`. One shared
+        ;; key would let whichever target ran last stand for all of them,
+        ;; which is the same trap `per-target` exports already avoid.
+        (swap! reg update [(:target ctx) from kind local] (fnil conj [])
+               {:filled filled
+                :waiting (or (:kin/ns ctx) :unknown)})))
     nil))
 
 (defn declare-form! [ctx opts sym] (declare! ctx :form opts sym))
-(defn declare-tag! [ctx opts sym] (declare! ctx :tag opts sym))
+(defn declare-tag!  [ctx opts sym] (declare! ctx :tag opts sym))
+(defn declare-name! [ctx opts sym] (declare! ctx :name opts sym))
 
 (defn define-form!
   "Define `sym` as CALLABLE -- `(merge-two rt ...)`.

@@ -90,6 +90,12 @@
      :targets (or targets {})
      :target-order (vec (or target-order (keys targets)))
      :sources sources
+     ;; WHAT ONE NAMESPACE OWES ANOTHER. `(declarefn other.ns/foo)` reserves
+     ;; `foo` here and records the debt; `other.ns` pays it when it defines
+     ;; `foo` publicly. Project-wide rather than per-source, because the two
+     ;; halves are in different files by construction.
+     :owed-atom (atom {})
+     :paid-atom (atom {})
      :host (vec host)}))
 
 #?(:clj
@@ -213,8 +219,23 @@
   Used only to build the dependency graph -- which namespace requires which
   -- before anything is emitted. It reads the `ns` form and nothing else."
   [text]
-  (let [all (edn/read-string {:readers {}} (str "[" text "]"))]
-    {:ns (first (filter #(and (seq? %) (= 'ns (first %))) all))}))
+  (let [all (edn/read-string {:readers {}} (str "[" text "]"))
+        decl? #{'declarefn 'declaretag 'declarename}]
+    {:ns (first (filter #(and (seq? %) (= 'ns (first %))) all))
+     ;; THE NAMESPACES THIS ONE DECLARES FROM, which is not the same set as
+     ;; the ones it requires and is deliberately not part of the dependency
+     ;; graph. A declaration exists precisely where a require would be a
+     ;; cycle, so counting it as an edge would refuse the thing it is for.
+     ;;
+     ;; What it IS used for is knowing whose join has to wait: a namespace
+     ;; holding a placeholder cannot be finished until whoever owes it has
+     ;; run.
+     :declares-from
+     (into #{}
+           (comp (filter #(and (seq? %) (decl? (first %))))
+                 (mapcat rest)
+                 (keep #(when (namespace %) (symbol (namespace %)))))
+           all)}))
 
 (defn- requires-of
   "The namespaces a source requires, in order."
@@ -442,8 +463,8 @@
   [target]
   (some? (:emit target)))
 
-(defn- render
-  "Render `analysis` for one target, into a string.
+(defn- render-open
+  "Render `analysis` for one target, into an UNJOINED context.
 
   A target's `:emit` -- when it has one -- is handed the context and ALL the
   forms and drives the emission ITSELF. That is the difference between
@@ -470,6 +491,8 @@
                    :vocab-order (:required (:target-report analysis))
                    :targets (:targets prj)
                    :exports (:exports-atom prj)
+                   :kin/owed (:owed-atom prj)
+                   :kin/paid (:paid-atom prj)
                    :locals (atom {}) :names (atom {})
                    :local-tags (atom {}) :tmp (atom 0))]
     ;; LINK FIRST, over the same registries generate will use. It walks every
@@ -491,7 +514,18 @@
     (if-let [emit (get-in prj [:targets target :emit])]
       (emit ctx (:all-forms analysis))
       (doseq [f (:forms analysis)] (kin/statement! ctx f)))
-    (kin/output ctx)))
+    ctx))
+
+(defn- render
+  "Render `analysis` for one target and JOIN it -- text, with every promise
+  settled.
+
+  The join is separate from the emission because a namespace that declared a
+  name from somewhere else cannot be joined until that somewhere else has run.
+  `render-open` emits and stops; this is emit-then-join, which is every
+  namespace that declared nothing across a boundary."
+  [prj analysis target]
+  (kin/output (render-open prj analysis target)))
 
 (defn generate
   "Source TEXT in, `{target text}` out, for every target it generates for.
@@ -503,6 +537,30 @@
   ([prj text label]
    (let [a (analyse prj text label)]
      (into {} (map (fn [t] [t (render prj a t)])) (:emit-for a)))))
+
+(defn- join-open
+  "Settle the namespaces left open by a cross-namespace declaration.
+
+  THE PROJECT-WIDE JOIN, and it exists for one reason: two namespaces that
+  declare from each other cannot both be finished in a single pass, because
+  whichever runs first is holding a placeholder the other has not filled yet.
+  Everything else -- every namespace that declared nothing across a boundary
+  -- was already joined where it was rendered, so this touches nothing in a
+  project that has no such declaration.
+
+  `kin/output` still refuses what never settled, and says which form waited
+  on what. A declaration naming something the other namespace does not
+  export, or does not export publicly, arrives here."
+  [{:keys [open generated] :as result}]
+  (if (empty? open)
+    result
+    (assoc result :generated
+           (reduce (fn [g label]
+                     (update g label
+                             (fn [by-target]
+                               (into {} (map (fn [[t ctx]] [t (kin/output ctx)]))
+                                     by-target))))
+                   generated open))))
 
 (defn generate-in-order
   "Every source, emitted ONCE, in dependency order.
@@ -522,6 +580,7 @@
   (let [labelled (into {} (for [{:keys [label text]} entries]
                             [label (assoc (parse-source text) :text text)]))
         order (require-order labelled)]
+   (join-open
     (reduce
      (fn [acc label]
        (let [{:keys [text ns]} (clojure.core/get labelled label)
@@ -532,11 +591,21 @@
              ;; against `Maps.mergeTwo(..)`. Sharing one atom across targets
              ;; would leave whichever ran last standing for all of them.
              per-target (atom {})
+             ;; A NAMESPACE THAT DECLARED ACROSS A BOUNDARY IS LEFT OPEN.
+             ;; Its promise is waiting on a definition in a namespace that
+             ;; may not have run yet -- and by construction may not be able
+             ;; to run first, since the pair is a cycle. So it emits now and
+             ;; joins at the end, when every debt that is going to be paid
+             ;; has been.
+             open? (boolean (seq (:declares-from (clojure.core/get labelled label))))
              out (into {} (map (fn [t]
                                  (let [ex (atom {:forms {} :tags {} :names {}})
-                                       text (render (assoc prj :exports-atom ex) a t)]
+                                       prj' (assoc prj :exports-atom ex)
+                                       v (if open?
+                                           (render-open prj' a t)
+                                           (render prj' a t))]
                                    (swap! per-target assoc t @ex)
-                                   [t text])))
+                                   [t v])))
                        (:emit-for a))
              ;; {target {kind {sym v}}} -> {kind {sym {target v}}}
              exports (atom (reduce-kv
@@ -549,6 +618,7 @@
                             {} @per-target))]
          (-> acc
              (assoc-in [:generated label] out)
+             (cond-> open? (update :open (fnil conj #{}) label))
              (update :order conj label)
              ;; The namespace is finished, so what it made public IS a
              ;; vocabulary now. Every later namespace resolves against it the
@@ -564,7 +634,8 @@
                                    (export-vocabulary (second ns) (:emit-for a)
                                                       @exports)))))))
      {:order [] :generated {} :project prj}
-     order)))
+     order))))
+
 
 ;; -------------------------------------------------------------------- emit
 ;;

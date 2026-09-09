@@ -1466,6 +1466,36 @@
                       (str (if stride (quot n stride) n))
                       (str "{unit}" bound "[" (idx (t ctx)) "]"))]))})))
 
+(defn- declaring
+  "The two halves of one `declare<kind>` form.
+
+  `spell?` is whether this kind emits a forward declaration on a target that
+  cannot hoist -- true for functions, false for names and tags, which need no
+  prototype in any language kin speaks."
+  [kind spell?]
+  (let [reserve (fn [ctx form]
+                  (doseq [nm (rest form)]
+                    (kin/declare! ctx kind
+                                  {:scope (if (:pub (meta nm)) :public :private)}
+                                  nm)))]
+    {:declare reserve
+     :generate
+     (fn [ctx form]
+       (reserve ctx form)
+       (when spell?
+         (let [tgt (get-in ctx [:targets (t ctx)])]
+           (when-not (:hoists? tgt true)
+             (if-let [spell (:forward-declaration tgt)]
+               (doseq [nm (rest form)]
+                 (kin/emit! ctx (kin/indent-of ctx) (spell ctx nm) "\n"))
+               (throw (ex-info
+                       (str "kin: " (t ctx) " says it does not hoist, so"
+                            " `(declarefn " (str/join " " (rest form))
+                            ")` needs a forward declaration in the"
+                            " output -- but the target supplies no"
+                            " `:forward-declaration` to spell one.")
+                       {:target (t ctx) :names (vec (rest form))})))))))}))
+
 (defn forms
   "The shape forms. `:default-tag` is the tag an untagged name is given, which
   is a per-subject choice and so is asked for rather than assumed.
@@ -1489,47 +1519,37 @@
     'defdata (defdata-form default-tag)
     'local (local-form default-tag)
     'for (for-form default-tag) 'while while-form 'forever forever-form
-    ;; `(declare foo bar)` -- a FORWARD REFERENCE within this namespace.
+    ;; `(declarefn foo)`, `(declarename N)`, `(declaretag T)` -- a FORWARD
+    ;; REFERENCE, in two halves, ONE FORM PER KIND.
     ;;
-    ;; Two mutually recursive functions in one file need it, the same way
-    ;; Clojure does. Across namespaces it is neither needed nor available:
-    ;; dependencies form a DAG, so everything a namespace requires is already
-    ;; emitted in full before it starts.
-    ;; `(declare foo bar)` -- a FORWARD REFERENCE, in two halves.
+    ;; Three rather than one `declare` because the kinds are already three
+    ;; everywhere else: `require-scope` concats a vocabulary's `:forms`,
+    ;; `:tags` and `:names`, `define!` takes the kind, and a tag can appear
+    ;; where a call cannot. A single `declare` would have to GUESS which
+    ;; registry a bare symbol belongs in, and the guess is unrecoverable --
+    ;; a name declared as a form resolves, and then fails at the use site
+    ;; saying something that is not what went wrong.
     ;;
-    ;; `:declare` reserves the names so link can resolve a reference to them
+    ;; `:declare` reserves the name so link can resolve a reference to it
     ;; before the definition arrives. `:generate` EMITS a forward declaration
     ;; where the target language needs one, and that is the better reason for
-    ;; keeping `declare` mandatory than strictness was: if the target cannot
-    ;; HOIST, the generated code needs its own forward declaration -- a C
-    ;; prototype, a Rust ordering constraint. Java hoists within a class and
-    ;; needs nothing, so it emits nothing.
+    ;; keeping a declaration mandatory than strictness was: if the target
+    ;; cannot HOIST, the generated code needs its own forward declaration --
+    ;; a C prototype, a Rust ordering constraint. Java hoists within a class
+    ;; and emits nothing.
+    ;;
+    ;; ONLY `declarefn` HAS A GENERATE HALF. A forward declaration is a thing
+    ;; a language says about a FUNCTION; a constant or a type alias declared
+    ;; ahead of itself needs no prototype in any of the three, and emitting
+    ;; one would be inventing syntax on the target's behalf.
     ;;
     ;; A TARGET SAYS WHETHER IT HOISTS, and how it spells a forward
     ;; declaration if it does not. kin has no view on either: `:hoists?`
     ;; false plus `:forward-declaration` is the target describing its own
     ;; language, exactly as `:reserved` and `:local-name` are.
-    'declare {:declare (fn [ctx form]
-                         (doseq [nm (rest form)]
-                           (kin/declare-form!
-                            ctx {:scope (if (:pub (meta nm)) :public :private)} nm)))
-              :generate
-              (fn [ctx form]
-                (doseq [nm (rest form)]
-                  (kin/declare-form!
-                   ctx {:scope (if (:pub (meta nm)) :public :private)} nm))
-                (let [tgt (get-in ctx [:targets (t ctx)])]
-                  (when-not (:hoists? tgt true)
-                    (if-let [spell (:forward-declaration tgt)]
-                      (doseq [nm (rest form)]
-                        (kin/emit! ctx (kin/indent-of ctx) (spell ctx nm) "\n"))
-                      (throw (ex-info
-                              (str "kin: " (t ctx) " says it does not hoist, so"
-                                   " `(declare " (str/join " " (rest form))
-                                   ")` needs a forward declaration in the"
-                                   " output -- but the target supplies no"
-                                   " `:forward-declaration` to spell one.")
-                              {:target (t ctx) :names (vec (rest form))}))))))}
+    'declarefn (declaring :form true)
+    'declaretag (declaring :tag false)
+    'declarename (declaring :name false)
     'break (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "break;\n"))
     'continue (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "continue;\n"))
     'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))}
