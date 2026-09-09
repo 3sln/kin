@@ -721,6 +721,64 @@
         (when-let [paid (:kin/paid ctx)] (swap! paid assoc k v))))
     nil))
 
+(defn- near
+  "Names in `candidates` close enough to `sym` to be worth suggesting.
+
+  Cheap on purpose: a shared prefix of three, or one edit apart. A suggester
+  that has to be tuned is one nobody trusts."
+  [sym candidates]
+  (let [t (str sym)
+        edit1? (fn [a b]
+                 (let [[la lb] [(count a) (count b)]]
+                   (when (<= (abs (- la lb)) 1)
+                     (loop [i 0 j 0 slack 1]
+                       (cond
+                         (neg? slack) false
+                         (and (= i la) (= j lb)) true
+                         (= i la) (recur i (inc j) (dec slack))
+                         (= j lb) (recur (inc i) j (dec slack))
+                         (= (nth a i) (nth b j)) (recur (inc i) (inc j) slack)
+                         (= la lb) (recur (inc i) (inc j) (dec slack))
+                         (< la lb) (recur i (inc j) (dec slack))
+                         :else (recur (inc i) j (dec slack)))))))]
+    (->> candidates
+         (map str)
+         (filter (fn [c] (or (edit1? t c)
+                             (and (>= (count t) 3) (>= (count c) 3)
+                                  (= (subs t 0 3) (subs c 0 3))))))
+         sort
+         (take 6)
+         vec)))
+
+(defn- out-of-scope-message
+  "Why `sym` did not resolve, said in one line a reader can act on.
+
+  THE COMMON CASE IS NOT A TYPO. It is a name that IS in a vocabulary this
+  file requires and was simply left out of the `:refer` list -- `do` and `and`
+  each cost a debugging round trip that way. The scope carries qualified keys
+  for everything a required vocabulary holds, so that case is answerable
+  exactly rather than guessed at, and it is checked first.
+
+  This used to print every name in scope: four hundred symbols, several
+  thousand characters, with the answer somewhere inside it. A message nobody
+  reads to the end is a message that does not name the cause."
+  [sym scope-syms]
+  (let [nm (name sym)
+        holders (->> (keys scope-syms)
+                     (filter #(and (namespace %) (= nm (name %))))
+                     (map namespace) sort vec)]
+    (cond
+      (seq holders)
+      (str " -- " (first holders) " has it, but this file does not `:refer` it."
+           (when (next holders)
+             (str " (also in " (str/join ", " (rest holders)) ")")))
+
+      :else
+      (let [bare (remove namespace (keys scope-syms))]
+        (if-let [close (seq (near sym bare))]
+          (str " -- did you mean " (str/join ", " close) "?")
+          (str " -- this file refers " (count bare) " names, none like it."))))))
+
 (defn- placeholder
   "An indirecting stand-in for a definition that has not arrived yet.
 
@@ -1181,8 +1239,7 @@
         (run-slot (form-slots f) :generate ctx form))
       (throw (ex-info (str "kin: " (first form) " is not in scope"
                            (when (:scope-syms ctx)
-                             (str " -- this file requires "
-                                  (pr-str (vec (sort (map str (keys (:scope-syms ctx))))))))) 
+                             (out-of-scope-message (first form) (:scope-syms ctx))))
                       {:symbol (first form)})))
     ;; A LOCAL CARRIES THE TAG IT WAS DECLARED WITH, and a literal whatever
     ;; the source's vocabularies say its shape implies. Both are recorded as

@@ -190,6 +190,53 @@
 (is "report: a project with no host annotations still answers the host keys"
     {:targets [] :namespaces [] :disagreements [] :arities {}} (:host r))
 
+;; ---------------------------------------------------------------------------
+;; AN OUT-OF-SCOPE NAME SAYS WHAT TO DO ABOUT IT.
+;;
+;; This used to print every name in scope -- four hundred symbols and several
+;; thousand characters, with the answer somewhere inside. It buried two real
+;; errors in one afternoon of porting, both of them the SAME cause: a name
+;; that is in a required vocabulary and simply absent from the `:refer` list.
+;;
+;; That case is answerable exactly rather than guessed at, because the scope
+;; carries a qualified key for everything a required vocabulary holds. So it
+;; is checked first, and only a name that is nowhere falls through to
+;; suggestions.
+(let [vocab {:namespace 'v :targets #{:rust}
+             :tags {'I32 {:name 'I32 :types {:rust "i32"}}}
+             :names {} :forms (core/forms {})}
+      prj (kp/project {:vocabularies [vocab]
+                       :targets {:rust kin.target/rust}
+                       :target-order [:rust]})
+      msg (fn [src] (try (kp/generate prj src "f.kin") nil
+                         (catch Exception e (first (str/split-lines (ex-message e))))))]
+
+  ;; 1. IN A VOCABULARY, NOT REFERRED. The common case.
+  (let [m (msg "(ns s.f (:require [v :refer [defn return I32]]))
+                (defn ^I32 f [^I32 x] (return (if true x x)))")]
+    (is "13. an unreferred name names the vocabulary that has it"
+        true (boolean (and m (str/includes? m "v has it")
+                           (str/includes? m ":refer"))))
+    ;; AND IT IS SHORT. The old message was ~4000 characters; the number here
+    ;; is a ceiling with room, not a measurement to chase.
+    (is "13. and the message is one line a reader finishes"
+        true (< (count m) 200)))
+
+  ;; 2. A TYPO gets near-misses rather than a catalogue.
+  (let [m (msg "(ns s.f (:require [v :refer [defn return I32]]))
+                (defn ^I32 f [^I32 x] (retrun x))")]
+    (is "13. a near-miss is suggested" true
+        (boolean (and m (str/includes? m "did you mean")
+                      (str/includes? m "return")))))
+
+  ;; 3. AND A NAME THAT IS NOWHERE says so, rather than listing everything as
+  ;; if the reader could spot the absence.
+  (let [m (msg "(ns s.f (:require [v :refer [defn return I32]]))
+                (defn ^I32 f [^I32 x] (zzzzzz x))")]
+    (is "13. a name that is nowhere says none is like it"
+        true (boolean (and m (str/includes? m "none like it")
+                           (< (count m) 200))))))
+
 (println)
 (if (zero? @failures)
   (println "diagnostics: the reports say what is true, and say why\n")
