@@ -70,7 +70,16 @@
     (defn ^:pub ^:method ^I32 quad [^Rt rt ^I32 x] (return (twice rt x)))
     ;; `triple` is ^:pub AND called right here, in its own file. This is the
     ;; case that catches an exclusive reading of `:scope`.
-    (defn ^:pub ^:method ^I32 nine [^Rt rt ^I32 x] (return (triple rt x)))"})
+    (defn ^:pub ^:method ^I32 nine [^Rt rt ^I32 x] (return (triple rt x)))"
+
+   ;; AN ALIAS RATHER THAN A REFER. `require-scope` puts an `alias/name` key in
+   ;; for every name the vocabulary holds, which is a different code path from
+   ;; the referred, unqualified one -- and it had no test and no user. flint's
+   ;; eighty-five sources all use `:refer`, so nothing exercised this at all.
+   "c.kin"
+   "(ns s.c (:require [demo :refer [defn return I32 Rt]]
+                      [s.a :as a]))
+    (defn ^:pub ^:method ^I32 eight [^Rt rt ^I32 x] (return (a/twice rt x)))"})
 
 (def prj
   (kp/resolve-exports
@@ -127,7 +136,7 @@
       false (str/includes? (:rust out) "use ")))
 
 (is "3. and the order is a topological one -- a before b"
-    ["a.kin" "b.kin"]
+    ["a.kin" "b.kin" "c.kin"]
     (:order (kp/generate-in-order
              prj (mapv (fn [[l t]] {:label l :text t}) sources))))
 
@@ -487,6 +496,22 @@
         "filled" (let [sub (assoc ctx :out (atom []))]
                    (held sub '(ghost))
                    (kin/output sub)))))
+
+;; 9. THE ALIAS PATH, which is not the referred path.
+(let [out (kp/generate prj (get sources "c.kin") "c.kin")]
+  (is "9. an alias resolves into the aliased namespace"
+      true (str/includes? (:rust out) "return self.twice(x);"))
+  ;; AND THE BARE NAME STAYS OUT. An alias is not a refer: `twice` unqualified
+  ;; must not resolve, or the alias is just an accidental second refer.
+  (is "9. and the bare name is NOT in scope through an alias"
+      true (boolean (try (kp/generate
+                          prj
+                          "(ns s.d (:require [demo :refer [defn return I32 Rt]]
+                                             [s.a :as a]))
+                           (defn ^:pub ^:method ^I32 f [^Rt rt ^I32 x] (return (twice rt x)))"
+                          "d.kin")
+                         false
+                         (catch Exception _ true)))))
 
 (println)
 (if (zero? @failures)
