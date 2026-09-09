@@ -118,7 +118,8 @@
 
 (def ^:private shapes
   "The three markers, spelled as a reader will see them in a message."
-  ["@kin:link:ns:" "@kin:link:form:<name>:" "@kin:link:tag:<name>:"])
+  ["@kin:link:ns:" "@kin:link:form:<name>:" "@kin:link:tag:<name>:"
+   "@kin:link:name:<name>:"])
 
 (defn- refuse-marker
   "A marker kin does not recognise is REFUSED, never skipped.
@@ -155,6 +156,7 @@
           2 (case (first segs)
               "form" [:form (symbol (second segs))]
               "tag" [:tag (symbol (second segs))]
+              "name" [:name (symbol (second segs))]
               nil)
           nil)))))
 
@@ -348,7 +350,7 @@
     (fail path line
           (str "the " (name target) " target's `:link` answered "
                (pr-str answer) " for `" sym "`. It answers a MAP -- at least "
-               (if (= :form kind) "a `:link-fn`" "a `:type`")
+               (case kind :form "a `:link-fn`" :tag "a `:type`" "a `:spelling`")
                " -- because kin reads the answer and never the annotation.")
           {:target target :symbol sym :answer answer}))
   (case kind
@@ -358,6 +360,16 @@
                        (name target) " target's `:link` answered no"
                        " `:link-fn` for it. A form's answer carries the"
                        " function kin installs in the vocabulary's `:forms`.")
+                  {:target target :symbol sym :answered (vec (sort (keys answer)))}))
+    :name (when-not (string? (:spelling answer))
+            (fail path line
+                  (str "`" sym "` is annotated as a NAME, and the "
+                       (name target) " target's `:link` answered no"
+                       " `:spelling` string for it. A name's answer carries"
+                       " how THIS target writes it, because that is the whole"
+                       " of what a name is: `spell-name` takes a map of"
+                       " per-target strings, and a host tree contributes one"
+                       " target's entry in it.")
                   {:target target :symbol sym :answered (vec (sort (keys answer)))}))
     :tag (when-not (:type answer)
            (fail path line
@@ -612,6 +624,20 @@
                                            {:name sym
                                             :types (into {} (map (fn [[t e]]
                                                                    [t (:type (:link e))]))
-                                                         by-target)})))))
+                                                         by-target)})
+                            ;; A MAP OF PER-TARGET STRINGS, which is the shape
+                            ;; `spell-name` calls the plain one and the only
+                            ;; shape a host tree can contribute: each tree
+                            ;; declares ITS spelling, and there is nothing to
+                            ;; link because a name a target writes locally is
+                            ;; in scope wherever its header is. The other shape
+                            ;; -- one `(fn [ctx] -> String)` for the whole
+                            ;; vocabulary -- cannot be assembled from three
+                            ;; trees each answering separately, and a hand
+                            ;; written vocabulary is where it belongs.
+                            :name (assoc-in v [:names sym]
+                                            (into {} (map (fn [[t e]]
+                                                            [t (:spelling (:link e))]))
+                                                  by-target))))))
                {} (by-key scans))]
     (reduce-kv (fn [m k v] (assoc m k (kin/check-vocabulary v))) {} built)))

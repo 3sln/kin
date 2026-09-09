@@ -147,7 +147,8 @@
 ;; code -- which is the original bug, reintroduced by a typo.
 (def unknown-marker
   (str "` is not a marker kin knows. It reads `@kin:link:ns:`,"
-       " `@kin:link:form:<name>:`, `@kin:link:tag:<name>:`. A marker kin does"
+       " `@kin:link:form:<name>:`, `@kin:link:tag:<name>:`,"
+       " `@kin:link:name:<name>:`. A marker kin does"
        " not recognise is refused rather than skipped, because a misspelt"
        " annotation and no annotation at all look identical from here."))
 
@@ -268,6 +269,7 @@
    :link (fn [data _ _]
            (case (:kind data)
              :type {:type (:as data)}
+             :const {:spelling (:as data)}
              :method {:arity (count (:args data))
                       :link-fn (fn [ctx form]
                                  (kin/emit! ctx (str (:class data) "." (:name data) "("
@@ -279,6 +281,7 @@
    :link (fn [data _ _]
            (case (:kind data)
              :type {:type (:as data)}
+             :const {:spelling (:as data)}
              :method {:arity (:takes data)
                       :link-fn (fn [ctx form]
                                  (kin/emit! ctx (str "self." (:fn data) "("
@@ -356,6 +359,28 @@
 
 (is "12. the two targets agree, so there is nothing to report" []
     (host/disagreements agreed))
+
+;; ------------------------------------------------------------------- 12b
+;;
+;; A NAME, which is the third thing a vocabulary holds and the last one a host
+;; tree could not declare. `spell-name`'s plain shape is a map of per-target
+;; strings, and that is exactly what three trees each stating their own
+;; spelling assemble into -- so a name needs no linking and each tree owns its
+;; own word for it.
+(def named
+  (scans [java-nth "// @kin:link:name:TY-STR: {:kind :const :as \"TY_STR\"}"]
+         [rust-nth "// @kin:link:name:TY-STR: {:kind :const :as \"TyStr\"}"]))
+
+(is "12b. a name annotated by both trees lands in `:names`, per target"
+    {:java "TY_STR" :rust "TyStr"}
+    (get-in (host/vocabularies named) ['demo.rt :names 'TY-STR]))
+
+(is "12b. and a name only one tree declares is reported like any other"
+    [{:issue :missing :sym 'TY-STR :declared #{:java} :missing #{:rust}}]
+    (mapv #(select-keys % [:issue :sym :declared :missing])
+          (host/disagreements
+           (scans [java-nth "// @kin:link:name:TY-STR: {:kind :const :as \"TY_STR\"}"]
+                  [rust-nth]))))
 
 (is "12. and the arity they agree on is what leaves the namespace"
     {['demo.rt 'vec-nth] 2} (host/arities agreed))
