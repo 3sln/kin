@@ -57,6 +57,77 @@
 
 ;; --------------------------------------------------------------- a project
 
+(defn check-group
+  "Answer `group` if no two of its maps claim one symbol for one target.
+
+  THE DECISION THIS REPLACES. A namespace declared both by a host tree's
+  annotations and by a hand-written vocabulary used to be REFUSED outright,
+  naming it, on the stated grounds that the annotations exist BECAUSE the
+  hand-written table drifted, so a project holding both is holding the drift
+  it meant to remove.
+
+  Grouping makes coexistence expressible, and the refusal as written would
+  block the case grouping exists for: a host tree declaring `my.ns` for Rust
+  and a hand-written map extending `my.ns` to Go is composition, not drift,
+  and nothing about it restates anything.
+
+  SO THE REFUSAL NARROWS RATHER THAN GOING AWAY. What it was really about is
+  two statements of the same fact, and that is exactly one symbol declared
+  for one target by two maps. Disjoint targets are extension; the same
+  symbol for a different target is extension; the same symbol for the SAME
+  target is the drift, and it is still refused, naming the symbol and the
+  target instead of just the namespace.
+
+  It is checked for every group rather than only for host-versus-hand,
+  because the hazard is not about where a map came from. Two hand-written
+  maps colliding would have been silently resolved by declared order, and
+  order is a tie-break nobody chose as an override mechanism -- override is
+  require order, which a SOURCE chooses and `source-origins` reports."
+  [nsym group]
+  (when (< 1 (count group))
+    (doseq [kind [:forms :tags :names]]
+      (let [claims (for [v group
+                         [sym entry] (clojure.core/get v kind)
+                         t (:targets v)]
+                     [[sym t] entry])
+            dupes (->> claims
+                       (group-by first)
+                       ;; TWO MAPS SAYING THE IDENTICAL THING IS NOT DRIFT,
+                       ;; and `require-scope` set this precedent: its `put`
+                       ;; treats an entry equal to the one already held as no
+                       ;; shadowing at all. An extension restating a tag it
+                       ;; needs for its own target is the ordinary case --
+                       ;; `{'I32 I32}` in two maps of a group is one fact
+                       ;; written twice, not two facts.
+                       ;;
+                       ;; It bites for tags and names and essentially never
+                       ;; for forms, which is right: a form is a closure and
+                       ;; two closures are not `=`, so two implementations
+                       ;; for one target stay ambiguous, which they are.
+                       (filter (fn [[_ cs]]
+                                 (< 1 (count (distinct (map second cs))))))
+                       (sort-by (comp str first)))]
+        (when (seq dupes)
+          (let [[[sym t] _] (first dupes)]
+            (throw (ex-info
+                    (str "kin: " (count dupes)
+                         (if (= 1 (count dupes))
+                           (str " symbol in " nsym " " (name kind)
+                                " is declared")
+                           (str " symbols in " nsym " " (name kind)
+                                " are declared"))
+                         " for one target by two maps of it -- `"
+                         sym "` for " t " is the first."
+                         " Several maps may share a `:namespace`, which is how"
+                         " a namespace is extended to a new language, but two"
+                         " of them answering for the same target is two"
+                         " statements of one fact and the order they were"
+                         " listed in would silently pick one.")
+                    {:namespace nsym :kind kind
+                     :collisions (mapv first dupes)}))))))) 
+  group)
+
+
 (defn project
   "A project value from vocabularies and targets you already hold.
 
@@ -64,29 +135,33 @@
   opens a file; a caller that has its vocabularies as values -- a test, a
   browser, a build that already required them -- never touches the loader.
 
+  `:vocabularies` IS GROUPED BY `:namespace`, and that is the shape the rest
+  of kin reads: `{ns-sym [vocabulary ...]}`, in the order given. Several maps
+  may name one namespace, and a reference walks the group for the first that
+  speaks its target -- see `kin/group-entry`. Declared order is preserved
+  because it is the tie-break: two maps that both speak a target and both
+  hold a symbol resolve to the earlier one.
+
   `:host` is a vector of INTERPRETED `kin.host` scans, and what they declare
-  becomes ordinary vocabularies here. A namespace declared BOTH by a host tree
-  and by hand is REFUSED naming it, rather than one of them silently winning:
-  a host annotation exists to stop a hand-written table from drifting away
-  from the code, and a project holding both is holding the drift it was meant
-  to remove. Deleting the table is the whole point of writing the
-  annotations."
+  becomes ordinary vocabularies here -- appended to whatever a hand-written
+  map already put under the same namespace rather than colliding with it."
   [{:keys [vocabularies targets target-order sources host]}]
-  (let [vocabs (into {} (map (fn [v] [(:namespace (kin/check-vocabulary v)) v]))
-                     vocabularies)
+  (let [checked (mapv kin/check-vocabulary vocabularies)
         from-host (if (seq host) (host/vocabularies host) {})
-        clash (filterv vocabs (sort-by str (keys from-host)))]
-    (when (seq clash)
-      (throw (ex-info
-              (str "kin: " (str/join ", " (map str clash))
-                   (if (= 1 (count clash))
-                     " is declared both by a host tree's annotations and by a hand-written vocabulary."
-                     " are each declared both by a host tree's annotations and by a hand-written vocabulary.")
-                   " Only one of them can be the statement of what the host"
-                   " exposes, and the annotations exist because the"
-                   " hand-written one drifted.")
-              {:namespaces clash})))
-    {:vocabularies (merge from-host vocabs)
+        ;; HAND-WRITTEN FIRST, THEN THE HOST TREES. Order inside a group is
+        ;; the tie-break, so it has to be a decision rather than whatever
+        ;; `merge` happened to do: a hand-written map is the one a person
+        ;; wrote on purpose for this project, and a host scan is a statement
+        ;; about what some other tree happens to expose. When both answer,
+        ;; the deliberate one wins.
+        grouped (reduce (fn [m v] (update m (:namespace v) (fnil conj []) v))
+                        {} checked)
+        grouped (reduce-kv (fn [m nsym vs] (update m nsym (fnil into []) vs))
+                           grouped
+                           (into {} (map (fn [[k v]] [k (if (vector? v) v [v])]))
+                                 from-host))]
+    (doseq [[nsym group] grouped] (check-group nsym group))
+    {:vocabularies grouped
      :targets (or targets {})
      :target-order (vec (or target-order (keys targets)))
      :sources sources
@@ -100,11 +175,26 @@
 
 #?(:clj
    (defn load-vocabulary
-     "Require `nsym` and read the vocabulary it declares.
+     "Require `nsym` and read the vocabularies it declares. Answers a VECTOR.
 
      The var may hold the map or a function returning one; a subject that
      builds its forms by merging wants the latter, and both are the same
-     value by the time anything asks."
+     value by the time anything asks.
+
+     IT MAY ALSO HOLD SEVERAL, as a vector, and that is what grouping needs.
+     One Clojure file declaring `{:namespace 'kin.lang :targets #{:go}}`
+     alongside its own subject vocabulary is the ordinary shape of extending
+     a namespace to a new language -- the extension is not a namespace of its
+     own, it is more of somebody else's.
+
+     THE NAME CHECK APPLIES TO THE SINGLE CASE ONLY. A var holding one map
+     must still name itself `nsym`: a source requires a vocabulary by its
+     `:namespace`, and a file whose one vocabulary calls itself something
+     else is a typo that would otherwise surface as `no vocabulary` somewhere
+     far away. A file holding SEVERAL cannot be named after all of them, and
+     the whole reason to hold several is that one of them belongs to another
+     namespace -- so the check would forbid exactly the case it exists to
+     serve."
      [nsym]
      (require nsym)
      (let [var (or (resolve (symbol (str nsym) "vocabulary"))
@@ -115,13 +205,19 @@
                                 " targets it speaks.")
                            {:namespace nsym})))
            v (if (fn? @var) (@var) @var)]
-       (when-not (= nsym (:namespace v))
-         (throw (ex-info (str "kin: " nsym "/vocabulary calls itself "
-                              (pr-str (:namespace v))
-                              " -- a vocabulary's `:namespace` is how a source"
-                              " requires it, so the two have to agree")
-                         {:namespace nsym :declared (:namespace v)})))
-       (kin/check-vocabulary v))))
+       (if (sequential? v)
+         (mapv kin/check-vocabulary v)
+         (do (when-not (= nsym (:namespace v))
+               (throw (ex-info (str "kin: " nsym "/vocabulary calls itself "
+                                    (pr-str (:namespace v))
+                                    " -- a vocabulary's `:namespace` is how a"
+                                    " source requires it, so the two have to"
+                                    " agree. A var holding a VECTOR of"
+                                    " vocabularies may name whatever it likes,"
+                                    " because a file that extends another"
+                                    " namespace cannot be named after it.")
+                               {:namespace nsym :declared (:namespace v)})))
+             [(kin/check-vocabulary v)])))))
 
 #?(:clj
    (defn load-project
@@ -130,7 +226,7 @@
      The one function here that needs a host with `require` in it, kept apart
      from `project` for that reason."
      [{:keys [vocabularies targets target-order sources host]}]
-     (project {:vocabularies (mapv load-vocabulary vocabularies)
+     (project {:vocabularies (into [] (mapcat load-vocabulary) vocabularies)
                :targets targets
                :target-order target-order
                :sources sources
@@ -277,14 +373,37 @@
       (doseq [label (sort (keys labelled))] (visit label [])))
     @order))
 
-(defn- export-vocabulary
-  "One kin namespace's exports, AS A VOCABULARY.
+(defn- export-vocabularies
+  "One kin namespace's exports, AS ONE VOCABULARY PER TARGET.
 
   This is the whole trick and it is why `require-scope` needs no change:
   requiring `runtime.merge` goes down the identical path as requiring
   `flint.impl.rt`, so `:refer`, aliases, first-match-wins and the attribution
-  in `source-origins` all work already. If this ever needs a second resolution path,
-  something has gone wrong.
+  in `source-origins` all work already. If this ever needs a second resolution
+  path, something has gone wrong.
+
+  PLURAL NOW, AND THAT DELETED A DISPATCHER. It used to answer one map whose
+  `:forms` entries were each a function that looked at `(:target ctx)` and
+  picked from a `{target impl}` map, throwing `is not exported for :go` when
+  the target was not in it. That existed only because a namespace could have
+  one map. It can have a group, so each target gets its own map holding its
+  own implementations, and `kin/group-entry` does the picking that every
+  other resolution already did. The error goes with it: a miss is now
+  `kin/group-miss`, in one place, for host trees and kin exports alike.
+
+  IT ALSO FIXES A REAL BUG. Tags and names were taken as `(val (first
+  by-target))` -- one target's entry used for all of them -- with the
+  reasoning that a tag carries its own per-target `:types` and a name its own
+  per-target spellings, so whichever you picked was the same value. That is
+  true of every tag and name `kin.lang` builds and false in general, and it
+  was measured before it was changed: in flint, eight exported names diverge
+  across targets, all of them function-valued, because a `(fn [ctx] -> String)`
+  is a fresh closure per target. Those particular closures are built from
+  target-agnostic data, so picking any one of them behaved identically -- the
+  bug was LATENT, not active, which is why flint's output is byte-identical
+  either side of this change. A vocabulary whose `define-name!` value depended
+  on the target it was declared under would have been silently wrong, and
+  that is a thing a vocabulary is allowed to do.
 
   `targets` IS PASSED IN, and that is a correction rather than a tidy-up.
   It used to be DERIVED -- the union of the targets that some exported form
@@ -301,32 +420,20 @@
 
   What a namespace speaks is what it GENERATED FOR -- `:emit-for`, which
   `analyse` computes from that namespace's own requires, `:kin/only` and
-  `:kin/exclude`. A namespace that exports nothing at all still speaks it.
-  The caller holds that set already, so asking for it deletes a derivation
-  rather than adding one."
+  `:kin/exclude`. A namespace that exports nothing at all still speaks it,
+  which is why a map is produced for every target even when all three
+  registries are empty."
   [ns-name targets kinds]
-  (let [;; A FORM dispatches on the target at CALL time, so an export built
-        ;; while generating one target is never used by another.
-        forms (into {}
-                    (for [[sym by-target] (clojure.core/get kinds :forms)]
-                      [sym (fn [ctx form]
-                             (if-let [f (clojure.core/get by-target (:target ctx))]
-                               (f ctx form)
-                               (throw (ex-info
-                                       (str "kin: " ns-name "/" sym
-                                            " is not exported for " (:target ctx))
-                                       {:namespace ns-name :symbol sym
-                                        :target (:target ctx)}))))]))
-        ;; A TAG and a NAME are DATA, and the same data whichever target was
-        ;; being emitted when they were recorded -- a tag carries its own
-        ;; per-target `:types`, a name its own per-target spellings.
-        plain (fn [k] (into {} (for [[sym by-target] (clojure.core/get kinds k)]
-                                 [sym (val (first by-target))])))]
-    {:namespace ns-name
-     :targets (set targets)
-     :forms forms
-     :tags (plain :tags)
-     :names (plain :names)}))
+  (let [for-target (fn [kind t]
+                     (into {} (for [[sym by-target] (clojure.core/get kinds kind)
+                                    :when (contains? by-target t)]
+                                [sym (clojure.core/get by-target t)])))]
+    (vec (for [t (sort-by str targets)]
+           {:namespace ns-name
+            :targets #{t}
+            :forms (for-target :forms t)
+            :tags (for-target :tags t)
+            :names (for-target :names t)}))))
 
 ;; ---------------------------------------------------------------- analysis
 
@@ -628,11 +735,16 @@
              ;; than reconstructed from what it happened to export. A
              ;; namespace of nothing but data tables and constants exports
              ;; only NAMES, and used to report that it spoke nothing.
+             ;; CONJED INTO THE GROUP, not assoc'd over it. A kin namespace
+             ;; contributes one map per target, and a namespace that a host
+             ;; tree or a hand-written vocabulary also declares keeps those
+             ;; too -- the exports are an addition to what that namespace is,
+             ;; not a replacement for it.
              (assoc :project
                     (cond-> prj
-                      ns (assoc-in [:vocabularies (second ns)]
-                                   (export-vocabulary (second ns) (:emit-for a)
-                                                      @exports)))))))
+                      ns (update-in [:vocabularies (second ns)] (fnil into [])
+                                    (export-vocabularies (second ns) (:emit-for a)
+                                                         @exports)))))))
      {:order [] :generated {} :project prj}
      order))))
 
@@ -919,13 +1031,31 @@
      (cons 'do forms))
     @acc))
 
+(def ^:private registry-of
+  "`kind-of`'s answer, as the key a vocabulary map holds that kind under.
+
+  Two spellings for one idea, and they are both load-bearing: the singular
+  is what `source-origins` attributes with -- `[shape :form]` reads as a
+  sentence -- and the plural is the key in the map. Named here because
+  guessing wrong is silent: `group-answer` asked for `:form` and every lookup
+  answered nil, so the attribution came out empty rather than wrong."
+  {:form :forms :tag :tags :name :names})
+
 (defn- kind-of
-  "Is `k` a form, a tag or a name in `vocab`?"
-  [vocab k]
-  (cond (contains? (:forms vocab) k) :form
-        (contains? (:tags vocab) k) :tag
-        (contains? (:names vocab) k) :name
-        :else :unknown))
+  "Is `k` a form, a tag or a name in this namespace's GROUP?
+
+  Asked of the group rather than of one map, and without reference to a
+  target: the KIND of a symbol is the one thing about it that cannot vary
+  across a group. A map that made `foo` a form where another made it a tag
+  would be two different symbols sharing a spelling, and nothing downstream
+  -- the require scope least of all -- could describe that. The first map
+  holding it answers."
+  [group k]
+  (or (some (fn [v] (cond (contains? (:forms v) k) :form
+                          (contains? (:tags v) k) :tag
+                          (contains? (:names v) k) :name))
+            group)
+      :unknown))
 
 (defn source-origins
   "Where everything in a source comes from, as DATA.
@@ -973,12 +1103,41 @@
         used (symbols-in forms)
         by-vocab (reduce (fn [m sym]
                            (if-let [[v k] (get scope sym)]
-                             (update m [v (kind-of (get (:vocabularies prj) v) k)]
+                             (update m [v (kind-of (kin/vocab-group
+                                                    (:vocabularies prj) v) k)]
                                      (fnil conj #{}) sym)
                              m))
                          {} used)
-        local (into #{} (remove #(get scope %)) used)]
+        local (into #{} (remove #(get scope %)) used)
+        ;; WHICH MAP ANSWERED, for every target this source generates for.
+        ;; With one map per namespace `it came from kin.lang` was the whole
+        ;; truth; with a group the other half is which map, and therefore
+        ;; whether every target got the same one.
+        answered-by
+        (into (sorted-map)
+              (for [sym (sort-by str used)
+                    :let [[v k] (get scope sym)]
+                    :when v]
+                [sym (into (sorted-map)
+                           (for [t emit-for
+                                 :let [reg (registry-of
+                                            (kind-of (kin/vocab-group
+                                                      (:vocabularies prj) v) k))
+                                       a (when reg
+                                           (kin/group-answer
+                                            (assoc ctx :target t) v reg k))]
+                                 :when a]
+                             [t a]))]))
+        ;; THE SUBSET THAT DIFFERS, which is the interesting one and is empty
+        ;; for every project whose namespaces have one map each. A reader
+        ;; scanning this wants the exceptions, not the census.
+        split (into (sorted-map)
+                    (for [[sym per-target] answered-by
+                          :when (< 1 (count (distinct (vals per-target))))]
+                      [sym per-target]))]
     {:label label
+     :answered-by answered-by
+     :split split
      :ns-name ns-name
      :target-report target-report
      :emit-for emit-for
@@ -1206,12 +1365,19 @@
          ds (host/disagreements (:host prj))
          usage (usage-problems prj srcs)]
      {:sources (vec (sort (keys srcs)))
+      ;; A VECTOR PER NAMESPACE, because a namespace is a group. The shape
+      ;; used to be one map per name, which cannot say that `kin.lang`
+      ;; speaks four languages out of two maps -- and which map holds what
+      ;; is exactly the question a reader has when a symbol resolves for
+      ;; three targets and not the fourth.
       :vocabularies (into (sorted-map)
-                          (for [[nm v] (:vocabularies prj)]
-                            [nm {:targets (:targets v)
-                                 :forms (count (:forms v))
-                                 :tags (count (:tags v))
-                                 :names (count (:names v))}]))
+                          (for [[nm group] (:vocabularies prj)]
+                            [nm (mapv (fn [v]
+                                        {:targets (:targets v)
+                                         :forms (count (:forms v))
+                                         :tags (count (:tags v))
+                                         :names (count (:names v))})
+                                      group)]))
       :origins origins
       :targets targets
       :destinations (destinations prj srcs)

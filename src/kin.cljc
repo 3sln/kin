@@ -385,6 +385,126 @@
 
 (declare dispatch literal)
 
+
+;; ------------------------------------------------------ a namespace is a GROUP
+;;
+;; SEVERAL VOCABULARY MAPS MAY SHARE A `:namespace`. A project collects every
+;; one it has -- hand-written, and the ones `kin.host` builds from
+;; `@kin:link:` annotations -- and groups them by the namespace they name.
+;; Resolving a symbol looks the namespace up and then WALKS that group,
+;; taking the first map that both speaks the current target and holds the
+;; symbol.
+;;
+;; This is the third half of the complaint the whole redesign came from:
+;; `:targets` said which languages a vocabulary speaks and first-match-wins
+;; said how to override one, but neither let you EXTEND one. Adding a fourth
+;; language to an existing three-language source meant writing your own
+;; shape vocabulary with four arms, because `kin.lang`'s speak three. Now a
+;; project contributes
+;;
+;;     {:namespace 'kin.lang :targets #{:go} :forms {...}}
+;;
+;; and every source that requires `kin.lang` gains Go WITHOUT ITS `ns` FORM
+;; CHANGING. That last clause is the point: a require-order chain would also
+;; work and would force every source to name the extension, which is exactly
+;; the coupling being complained about.
+;;
+;; IT IS ALSO A CONSOLIDATION. kin did per-target form dispatch in two other
+;; places -- `kin.host` for annotated host trees and `kin.project` for a kin
+;; namespace's exports -- each wrapping a `{target impl}` map in a function
+;; that picked at call time, each with its own hand-written "not declared for
+;; this target" error. Both were one-map-per-namespace workarounds. Both are
+;; gone: each contributes one map per target and this walk picks.
+
+(defn vocab-group
+  "Every vocabulary map declared under `vname`, in the order given.
+
+  A BARE MAP IS A GROUP OF ONE. A context built by hand -- which is what a
+  test does -- naturally writes `{:vocabs {'demo vocabulary}}`, and a
+  vocabulary is always a map while a group is always sequential, so the two
+  cannot be confused. Normalising on read rather than at every construction
+  site keeps the hand-built case honest instead of subtly special."
+  [vocabs vname]
+  (when-let [g (clojure.core/get vocabs vname)]
+    (if (map? g) [g] (vec g))))
+
+(defn speaks?
+  "Does this vocabulary map declare `target`?"
+  [v target]
+  (contains? (:targets v) target))
+
+(defn group-targets
+  "Every target SOME map in `vname`'s group speaks.
+
+  The union, which is what the namespace speaks as far as a source requiring
+  it is concerned: for each of these targets there is a map that can answer."
+  [vocabs vname]
+  (reduce into #{} (map :targets (vocab-group vocabs vname))))
+
+(defn group-entry
+  "What `vname` gives `k` under `kind` for this context's target, or nil.
+
+  THE WALK IS THE WHOLE FEATURE. The group's maps are tried in the order the
+  project declared them, and the first that BOTH speaks this target AND holds
+  `k` answers. A map that does not speak the target is skipped even when it
+  holds the symbol -- that is what stops `kin.lang`'s three-armed `defn` from
+  being handed a fourth target it has no arm for."
+  [ctx vname kind k]
+  (let [target (:target ctx)]
+    (some (fn [v]
+            (when (and (speaks? v target)
+                       (contains? (clojure.core/get v kind) k))
+              (clojure.core/get-in v [kind k])))
+          (vocab-group (:vocabs ctx) vname))))
+
+(defn group-answer
+  "WHICH map of `vname`'s group answers `k` under `kind` here.
+
+      {:index 1 :targets #{:go}}
+
+  The same walk `group-entry` does, answering where it landed rather than
+  what it found. `source-origins` needs this and nothing else does: with one
+  map per namespace, `this symbol came from kin.lang` was the whole truth,
+  and with a group it is half of it -- the other half is which map, and
+  therefore whether the answer is the same for every target the source
+  generates for. A symbol resolving differently per target is the new thing
+  grouping makes possible, so it is the new thing a reader has to be able to
+  see."
+  [ctx vname kind k]
+  (let [target (:target ctx)]
+    (first
+     (keep-indexed
+      (fn [i v]
+        (when (and (speaks? v target)
+                   (contains? (clojure.core/get v kind) k))
+          {:index i :targets (:targets v)}))
+      (vocab-group (:vocabs ctx) vname)))))
+
+(defn group-miss
+  "Why `vname` gave nothing for `k`, as a sentence, or nil if it would have.
+
+  ONE ERROR, IN ONE PLACE. `kin.host` and `kin.project` each used to write
+  their own version of this -- `is not exported for :go`, `is annotated for
+  rust java and not for :go` -- because each held a `{target impl}` map and
+  did its own dispatch. Under grouping there is one walk, so there is one way
+  to miss and one sentence for it, and it can say something neither of those
+  could: which maps DO hold the symbol, and what each of them speaks."
+  [ctx vname kind k]
+  (let [target (:target ctx)
+        group (vocab-group (:vocabs ctx) vname)
+        holders (filterv #(contains? (clojure.core/get % kind) k) group)]
+    (when (and (seq holders) (not-any? #(speaks? % target) holders))
+      (str "kin: " vname "/" k " is declared for "
+           (str/join " " (sort (map name (reduce into #{} (map :targets holders)))))
+           " and not for " target ". "
+           (if (= 1 (count group))
+             (str "One map declares " vname
+                  ", and it does not speak " target
+                  " -- contribute another with `:namespace '" vname
+                  "` and `:targets #{" target "}`.")
+             (str (count group) " maps declare " vname
+                  " and none of the ones holding `" k "` speaks " target "."))))))
+
 (defn require-scope
   "The symbol table a source's `ns` form asks for.
 
@@ -440,15 +560,28 @@
                  opts (apply hash-map (rest spec))
                  alias (:as opts)
                  referred (:refer opts)
-                 vocab (clojure.core/get vocabs vname)]
-             (when-not vocab
+                 group (vocab-group vocabs vname)]
+             (when-not (seq group)
                (throw (ex-info (str "kin: no vocabulary " vname)
                                {:required vname :known (vec (keys vocabs))})))
              ;; FORMS AND TAGS ALIKE. A tag is referred and aliased exactly as a
              ;; form is -- `^Usize` has to mean whichever vocabulary's `Usize` this
              ;; file asked for, for the same reason `let` does.
-             (let [names (concat (keys (:forms vocab)) (keys (:tags vocab))
-                                 (keys (:names vocab)))]
+             ;;
+             ;; ACROSS THE WHOLE GROUP, as a union. What a source may REFER is
+             ;; what the namespace offers, and the namespace is every map
+             ;; declaring it -- so a Go extension of `kin.lang` makes `defn`
+             ;; referable for a Go source without `kin.lang` itself changing.
+             ;; Which map answers is a question for the reference, where the
+             ;; target is known; here there is only the name.
+             (let [names (distinct
+                          (mapcat (fn [v] (concat (keys (:forms v)) (keys (:tags v))
+                                                  (keys (:names v))))
+                                  group))
+                   holds? (fn [k] (some (fn [v] (or (contains? (:forms v) k)
+                                                    (contains? (:tags v) k)
+                                                    (contains? (:names v) k)))
+                                        group))]
                (as-> acc a
                  ;; Fully qualified always works.
                  (reduce (fn [m k] (put m (symbol (str vname) (str k)) [vname k])) a names)
@@ -458,9 +591,7 @@
                    a)
                  ;; And only what was REFERRED, unqualified.
                  (reduce (fn [m k]
-                           (when-not (or (contains? (:forms vocab) k)
-                                         (contains? (:tags vocab) k)
-                                         (contains? (:names vocab) k))
+                           (when-not (holds? k)
                              (throw (ex-info (str "kin: " vname " has no " k " to refer")
                                              {:vocabulary vname :symbol k})))
                            (put m k [vname k]))
@@ -526,10 +657,19 @@
   (let [specs (require-specs ns-form)
         required (mapv first specs)
         _ (doseq [v required]
-            (when-not (clojure.core/get vocabs v)
+            (when-not (seq (vocab-group vocabs v))
               (throw (ex-info (str "kin: no vocabulary " v)
                               {:required v :known (vec (keys vocabs))}))))
-        spoken (into {} (map (fn [v] [v (:targets (clojure.core/get vocabs v))])) required)
+        ;; WHAT A NAMESPACE SPEAKS IS THE UNION OF ITS MAPS. For every target
+        ;; in here some map can answer, which is precisely the condition the
+        ;; intersection below needs -- a namespace whose three-armed forms
+        ;; come from one map and whose fourth arm comes from another speaks
+        ;; four, and no single map does.
+        spoken (into {} (map (fn [v] [v (group-targets vocabs v)])) required)
+        ;; The per-map breakdown, kept because the union throws it away and a
+        ;; reader asking why a target was ruled out wants to see which map
+        ;; was supposed to supply it. `kin.project/report` prints this.
+        by-map (into {} (map (fn [v] [v (mapv #(select-keys % [:targets]) (vocab-group vocabs v))])) required)
         all (reduce into #{} (vals spoken))
         common (if (seq spoken)
                  (reduce clojure.set/intersection (vals spoken))
@@ -572,7 +712,7 @@
                      " checks.")
                 {:namespace (second ns-form) :spoken spoken
                  :only only :exclude exclude})))
-      {:required required :spoken spoken :common common
+      {:required required :spoken spoken :by-map by-map :common common
        :only only :exclude exclude :targets targets :ruled-out ruled-out})))
 
 (defn effective-targets
@@ -599,7 +739,7 @@
   (when sym
     (if-let [scope (:scope-syms ctx)]
       (when-let [[vname k] (clojure.core/get scope sym)]
-        (get-in ctx [:vocabs vname :tags k]))
+        (group-entry ctx vname :tags k))
       (get-in ctx [:tags sym]))))
 
 (defn spell-name
@@ -643,7 +783,7 @@
   [ctx sym]
   (when-let [scope (:scope-syms ctx)]
     (when-let [[vname k] (clojure.core/get scope sym)]
-      (spell-name ctx (get-in ctx [:vocabs vname :names k])))))
+      (spell-name ctx (group-entry ctx vname :names k)))))
 
 (def ^:private registries
   "Where each KIND of definition is kept, locally and for export.
@@ -900,7 +1040,7 @@
   [ctx head]
   (if-let [scope (:scope-syms ctx)]
     (or (when-let [[vname k] (clojure.core/get scope head)]
-          (get-in ctx [:vocabs vname :forms k]))
+          (group-entry ctx vname :forms k))
         (clojure.core/get (some-> (:locals ctx) deref) head))
     (or (get-in ctx [:vocab head])
         (clojure.core/get (some-> (:locals ctx) deref) head))))
@@ -952,10 +1092,28 @@
   kin has none of its own. So it ASKS: a vocabulary may carry a
   `:literal-tag`, a `(fn [v] -> tag or nil)`, and the first required
   vocabulary to answer wins -- the same first-match rule the require scope
-  uses, for the same reason."
+  uses, for the same reason.
+
+  WHICH MAP OF A GROUP ANSWERS, decided rather than left to fall out: the
+  first one that SPEAKS THIS TARGET and carries a `:literal-tag`. Require
+  order is walked first and the group in declared order within it, so the
+  rule is the same two-level first-match every other resolution here uses.
+
+  The alternative was to let any map of the group answer whether or not it
+  speaks the target, on the grounds that a literal's tag is a fact about the
+  source rather than about a language. That is wrong for the case grouping
+  exists to serve: a Go extension of a three-language namespace may well
+  want `5` to mean something a `u32` does not, and a map that cannot speak
+  the target cannot be asked what its types are -- `check-vocabulary` only
+  guarantees a tag has a type for the targets ITS OWN map claims, so a tag
+  borrowed across that line is exactly the missing-type silence the check
+  exists to prevent."
   [ctx v]
   (some (fn [vname]
-          (when-let [f (get-in ctx [:vocabs vname :literal-tag])] (f v)))
+          (some (fn [vm]
+                  (when-let [f (:literal-tag vm)] (f v)))
+                (filter #(speaks? % (:target ctx))
+                        (vocab-group (:vocabs ctx) vname))))
         (:vocab-order ctx)))
 
 (defn available?
@@ -1186,7 +1344,7 @@
   [ctx res]
   (case (:kind res)
     :local (clojure.core/get (some-> (:locals ctx) deref) (:sym res))
-    :vocabulary (get-in ctx [:vocabs (:namespace res) :forms (:sym res)])
+    :vocabulary (group-entry ctx (:namespace res) :forms (:sym res))
     nil))
 
 (defn link!
@@ -1237,10 +1395,21 @@
                         ((form-fn ctx (first form)) sub form)
                         (resolve-sink (deref (:out sub)))))))
         (run-slot (form-slots f) :generate ctx form))
-      (throw (ex-info (str "kin: " (first form) " is not in scope"
-                           (when (:scope-syms ctx)
-                             (out-of-scope-message (first form) (:scope-syms ctx))))
-                      {:symbol (first form)})))
+      ;; IN SCOPE, AND NOT FOR THIS TARGET, is a different failure from NOT
+      ;; IN SCOPE, and saying so is what the two deleted dispatchers were
+      ;; for. `group-miss` answers when the require scope resolved the name
+      ;; but no map of its namespace that speaks this target holds it --
+      ;; which is what a half-extended namespace looks like from here.
+      (let [head (first form)
+            miss (when-let [[vname k] (some-> (:scope-syms ctx)
+                                              (clojure.core/get head))]
+                   (group-miss ctx vname :forms k))]
+        (throw (if miss
+                 (ex-info miss {:symbol head :target (:target ctx)})
+                 (ex-info (str "kin: " head " is not in scope"
+                               (when (:scope-syms ctx)
+                                 (out-of-scope-message head (:scope-syms ctx))))
+                          {:symbol head})))))
     ;; A LOCAL CARRIES THE TAG IT WAS DECLARED WITH, and a literal whatever
     ;; the source's vocabularies say its shape implies. Both are recorded as
     ;; this form's product, so an enclosing form asking `render-tagged`

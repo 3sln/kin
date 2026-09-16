@@ -566,33 +566,31 @@
 
 ;; ------------------------------------------------------- as a vocabulary
 
-(defn- form-entry
-  "One symbol's `:forms` entry: a link fn that picks the target's at CALL time.
-
-  Deliberately the same shape as the one `kin.project` builds for a kin
-  namespace's exports, including the error. Both answer the same question --
-  several targets each supplied an implementation, and which one is wanted is
-  not known until a form is rendered -- and answering it twice in two shapes
-  would be two things to keep in step."
-  [nsym sym by-target]
-  (fn [ctx form]
-    (if-let [f (get by-target (:target ctx))]
-      (f ctx form)
-      (throw (ex-info (str "kin.host: " nsym "/" sym " is annotated for "
-                           (str/join " " (map name (sort (keys by-target))))
-                           " and not for " (:target ctx)
-                           " -- no host file declares it there.")
-                      {:namespace nsym :symbol sym :target (:target ctx)
-                       :annotated (vec (sort (keys by-target)))})))))
-
 (defn vocabularies
-  "The interpreted scans, as ordinary kin vocabularies: `{ns-sym vocabulary}`.
+  "The interpreted scans, as ordinary kin vocabularies: `{ns-sym [vocabulary ...]}`.
 
   This is where the namespace stops being about annotations: what comes out is
   a value a project puts in its `:vocabularies` beside a hand-written one, and
   nothing downstream can tell them apart. A source requires it by name, the
   require scope resolves through it, `source-origins` attributes symbols to
   it, and none of them know an annotation was involved.
+
+  ONE MAP PER TARGET, which is what deleted a dispatcher. Every `:forms`
+  entry used to be a function that read `(:target ctx)` and picked from a
+  `{target link-fn}` map, throwing `is annotated for rust java and not for
+  :go` when the target was not there -- and it existed only because a
+  namespace could hold one map. It can hold a group, so each target
+  contributes its own map and `kin/group-entry` picks, the same walk every
+  other resolution uses. The error goes with it: `kin/group-miss` says the
+  same thing once, for host trees and for a kin namespace's exports alike.
+
+  Splitting by target also makes the tags honest. A tag used to be assembled
+  with a `:types` map gathered from every target that annotated it, which is
+  the right value and the wrong claim: the map said it spoke three languages
+  while one file's annotation might have been missing. Now a target's map
+  claims that target and carries that target's type, and `check-vocabulary`
+  -- which is UNCHANGED, and is what makes grouping safe -- checks exactly
+  that.
 
   Plural because `@kin:link:ns:` is per file, so one host tree may declare
   into several kin namespaces -- a package per namespace is the obvious layout
@@ -606,38 +604,37 @@
   has no type for it`, and only the scan knows that the Rust annotation is
   missing from a named file at a named line."
   [scans]
-  (let [built (reduce
+  (let [;; {[nsym target] vocabulary}, built one annotation at a time.
+        built (reduce
                (fn [vs [[nsym kind sym] by-target]]
-                 (let [v (or (get vs nsym)
-                             {:namespace nsym :targets #{}
-                              :tags {} :forms {} :names {}})
-                       v (update v :targets into (keys by-target))]
-                   (assoc vs nsym
-                          (case kind
-                            :form (assoc-in v [:forms sym]
-                                            (form-entry
-                                             nsym sym
-                                             (into {} (map (fn [[t e]]
-                                                             [t (:link-fn (:link e))]))
-                                                   by-target)))
-                            :tag (assoc-in v [:tags sym]
-                                           {:name sym
-                                            :types (into {} (map (fn [[t e]]
-                                                                   [t (:type (:link e))]))
-                                                         by-target)})
-                            ;; A MAP OF PER-TARGET STRINGS, which is the shape
-                            ;; `spell-name` calls the plain one and the only
-                            ;; shape a host tree can contribute: each tree
-                            ;; declares ITS spelling, and there is nothing to
-                            ;; link because a name a target writes locally is
-                            ;; in scope wherever its header is. The other shape
-                            ;; -- one `(fn [ctx] -> String)` for the whole
-                            ;; vocabulary -- cannot be assembled from three
-                            ;; trees each answering separately, and a hand
-                            ;; written vocabulary is where it belongs.
-                            :name (assoc-in v [:names sym]
-                                            (into {} (map (fn [[t e]]
-                                                            [t (:spelling (:link e))]))
-                                                  by-target))))))
+                 (reduce
+                  (fn [vs [t e]]
+                    (let [k [nsym t]
+                          v (or (get vs k)
+                                {:namespace nsym :targets #{t}
+                                 :tags {} :forms {} :names {}})]
+                      (assoc vs k
+                             (case kind
+                               :form (assoc-in v [:forms sym] (:link-fn (:link e)))
+                               :tag (assoc-in v [:tags sym]
+                                              {:name sym
+                                               :types {t (:type (:link e))}})
+                               ;; A MAP OF PER-TARGET STRINGS, which is the
+                               ;; shape `spell-name` calls the plain one and
+                               ;; the only shape a host tree can contribute:
+                               ;; each tree declares ITS spelling, and there
+                               ;; is nothing to link because a name a target
+                               ;; writes locally is in scope wherever its
+                               ;; header is. The other shape -- one `(fn
+                               ;; [ctx] -> String)` for the whole vocabulary
+                               ;; -- cannot be assembled from three trees each
+                               ;; answering separately, and a hand written
+                               ;; vocabulary is where it belongs.
+                               :name (assoc-in v [:names sym]
+                                               {t (:spelling (:link e))})))))
+                  vs by-target))
                {} (by-key scans))]
-    (reduce-kv (fn [m k v] (assoc m k (kin/check-vocabulary v))) {} built)))
+    (reduce (fn [m [[nsym _] v]]
+              (update m nsym (fnil conj []) (kin/check-vocabulary v)))
+            {}
+            (sort-by (comp str first) built))))
