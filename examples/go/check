@@ -1,0 +1,83 @@
+#!/bin/sh
+# Generate, COMPILE and RUN both targets, and require the same answer.
+#
+#     ./check
+#
+# The README has always claimed this example "compiles clean, and both print
+# `6 21` when called". That was checked by hand, once, which is the same
+# arrangement `kin/verify` exists in flint to replace: a claim in prose with
+# nothing that would go red if it stopped being true.
+#
+# It matters more than an example usually would, because this example IS the
+# acceptance test for namespace-grouped vocabularies. The Go arms of `defn`,
+# `let`, `while`, `set`, `return` and the operators come from a map this
+# project contributes to `kin.lang`, and the JAVA arms come from `kin.lang`
+# itself -- one source, one `ns` form naming `kin.lang` once, two maps
+# answering for different targets. If that were quietly not happening the
+# files would still generate; only compiling and running them says so.
+set -e
+cd "$(dirname "$0")"
+work=$(mktemp -d "${TMPDIR:-/tmp}/kin-go-example.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+./emit kin/gcd.kin > /dev/null
+
+# gofmt is the tightest check available on the Go side and it is free: it
+# rewrites anything it does not like, so "no output" means the generated file
+# is already what Go would have written.
+gofmt -l out/go/ | while read -r f; do
+  echo "  FAIL gofmt would rewrite $f"; exit 1
+done
+
+# --- Go ---------------------------------------------------------------------
+mkdir -p "$work/go/gcd"
+cp out/go/gcd.go "$work/go/gcd/gcd.go"
+cat > "$work/go/go.mod" <<'MOD'
+module example
+
+go 1.21
+MOD
+cat > "$work/go/main.go" <<'MAIN'
+package main
+
+import (
+	"fmt"
+	"example/gcd"
+)
+
+func main() {
+	fmt.Println(gcd.Gcd(12, 18), gcd.GcdLabel(42, 63))
+}
+MAIN
+go_out=$(cd "$work/go" && go run . 2>&1)
+
+# --- Java -------------------------------------------------------------------
+JDK="${FLINT_JDK:-/opt/homebrew/opt/openjdk}"
+[ -x "$JDK/bin/javac" ] || JDK=$(/usr/libexec/java_home 2>/dev/null)
+mkdir -p "$work/java"
+cp -R out/java/example "$work/java/"
+cat > "$work/java/Main.java" <<'MAIN'
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(example.Gcd.gcd(12, 18) + " " + example.Gcd.gcdLabel(42, 63));
+    }
+}
+MAIN
+(cd "$work/java" && "$JDK/bin/javac" -d . example/Gcd.java Main.java)
+java_out=$(cd "$work/java" && "$JDK/bin/java" Main)
+
+echo "  go     $go_out"
+echo "  java   $java_out"
+
+# TWO CHECKS, NOT ONE. That the targets agree is the claim this example makes;
+# that they agree on `6 21` is the claim the README makes. Either alone can
+# pass while the other fails -- two identically wrong answers agree perfectly.
+fails=0
+if [ "$go_out" != "$java_out" ]; then
+  echo "  FAIL the two targets disagree"; fails=1
+fi
+if [ "$go_out" != "6 21" ]; then
+  echo "  FAIL expected \`6 21\`, got \`$go_out\`"; fails=1
+fi
+[ "$fails" -eq 0 ] || exit 1
+echo "  ok   one source, two languages, same answer -- and Java's shape forms came from kin.lang"

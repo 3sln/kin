@@ -8,6 +8,12 @@
             [example.targets :as targets]))
 
 (def project
-  (delay (kp/load-project {:vocabularies '[example.lang]
+  (delay (kp/load-project {;; `example.lang` declares TWO maps -- this
+                           ;; example's subject, and Go added to `kin.lang`
+                           ;; -- and `kin.lang` declares its own. The
+                           ;; `kin.lang` GROUP is therefore two maps, and a
+                           ;; source requiring it gets Go from one and Java
+                           ;; from the other.
+                           :vocabularies '[example.lang kin.lang]
                            :targets targets/targets
                            :target-order [:go :java]})))

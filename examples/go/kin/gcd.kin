@@ -10,15 +10,31 @@
 ;; functions inside it. Each target's `:emit` writes its own; kin has no
 ;; opinion about either.
 (ns example.gcd
-  (:require [example.lang :refer [defn return let set while comment
-                                  to-str != > rem I32 Str]]))
+  ;; TWO REQUIRES, AND `kin.lang` IS THE SHIPPED ONE. The shape forms come
+  ;; from `kin.lang` -- Go's arms from the map `example.lang` contributes to
+  ;; that namespace, Java's from `kin.lang` itself -- and the tags and
+  ;; `to-str` from this example's own subject vocabulary. Nothing here says
+  ;; which map answers, and nothing here would change if a fifth language
+  ;; were added.
+  (:require [kin.lang :refer [defn return let set while comment != > rem]]
+            [example.lang :refer [to-str I32 Str]]))
 
 (defn ^I32 gcd [^I32 a ^I32 b]
   (comment "Euclid's algorithm, by repeated remainder.")
   (let [x a
         y b]
     (while (!= y 0)
-      (let [t (rem x y)]
+      ;; `^I32` IS REQUIRED HERE, and it is `kin.lang`'s contract rather than
+      ;; an accident. `kin.lang`'s own vocabulary carries NO default tag --
+      ;; what an untagged binding means is a subject's choice -- and its
+      ;; operators do not tag their product, so nothing can infer what
+      ;; `(rem x y)` is. Go would not have cared: `:=` infers, and the
+      ;; annotation is ignored by the arm that writes it. Java needs the type
+      ;; written out, and this is where it comes from.
+      ;;
+      ;; `x` and `y` need no annotation because `defn` registers a tag for
+      ;; every parameter, so they infer from `a` and `b`.
+      (let [^I32 t (rem x y)]
         (set x y)
         (set y t)))
     (return x)))
