@@ -725,8 +725,13 @@
 
   Shifts are deliberately absent everywhere: `>>>` against `>>` is the
   difference the vocabulary exists to hide, and `>>>=` would put it back in
-  the source."
-  (let [everywhere (fn [op] {:rust op :java op :csharp op})]
+  the source.
+
+  `:go` was missing from `everywhere` when Go arrived, so every `(set acc (+
+  acc i))` came out `acc = acc + i` where a person writes `acc += i`. Adding a
+  key here cannot change the other three, which is why it is safe to fix in
+  the shared table rather than in Go's map."
+  (let [everywhere (fn [op] {:rust op :go op :java op :csharp op})]
     {'+ (everywhere "+=") '- (everywhere "-=") '* (everywhere "*=")
      'bit-and (everywhere "&=") 'bit-or (everywhere "|=")
      'bit-xor (everywhere "^=")}))
@@ -1728,13 +1733,76 @@
               (fn [inner] (doseq [f (rest form)] (kin/statement! inner f))))
   (kin/emit! ctx (kin/indent-of ctx) "}\n"))
 
+(defn- go-case
+  "Go's `switch`, which is the Java/C# shape with three differences.
+
+  No parentheses round the scrutinee; labels share one `case` separated by
+  commas rather than one `case` per line; and Go does not fall through, so the
+  `break` the other two need is absent rather than omitted. Arms still
+  `return` for themselves, as they do on the JVM and CLR and unlike Rust,
+  because a Go `switch` is a statement and yields nothing."
+  [ctx form]
+  (let [[_ subject & clauses] form
+        pairs (loop [cs clauses acc []]
+                (cond (empty? cs) acc
+                      (and (seq? (first cs)) (= 'comment (first (first cs))))
+                      (recur (rest cs) (conj acc [:comment (first cs)]))
+                      :else (recur (drop 2 cs) (conj acc [(first cs) (second cs)]))))
+        scrut (strip-parens (kin/render ctx subject))]
+    (kin/emit! ctx (kin/indent-of ctx) "switch " scrut " {\n")
+    (kin/scoped
+     ctx {:key :in-case :value true}
+     (fn [inner]
+       (doseq [[labels body] pairs]
+         (if (= :comment labels)
+           (comment-form inner body)
+           (let [else? (= :else labels)]
+             (if else?
+               (kin/emit! inner (kin/indent-of inner) "default:\n")
+               ;; ONE `case`, COMMA-SEPARATED, four to a line -- the same
+               ;; column budget the other two are held to, spelled Go's way.
+               (let [ls (mapv (fn [l] (kin/render inner l)) labels)]
+                 (doseq [[i chunk] (map-indexed vector (partition-all 4 ls))]
+                   (kin/emit! inner (kin/indent-of inner)
+                              (if (zero? i) "case " "     ")
+                              (str/join ", " chunk)
+                              (if (= (* 4 (inc i)) (count ls)) "" "")
+                              (if (>= (* 4 (inc i)) (count ls)) ":" ",")
+                              "\n"))))
+             (kin/scoped inner {:key :in-arm :value true :indent 1}
+                         (fn [in2]
+                           (kin/emit! in2 (kin/indent-of in2) "return "
+                                      (strip-parens (kin/render in2 body)) "\n"))))))))
+    (kin/emit! ctx (kin/indent-of ctx) "}\n")))
+
+(defn- go-for
+  "`for n := a; n < b; n++ {` -- C-shaped without the parentheses.
+
+  The counter takes its type from `a`, per the `go-let` decision: Go has no
+  implicit conversion, so writing the tag's type out protects against nothing
+  the compiler would not catch anyway."
+  [default]
+  (fn [ctx form]
+    (let [[_ binding & body] form
+          [nm start end] binding
+          tag (kin/tag ctx (:tag (meta nm)))
+          _ (kin/define-tag! ctx {:scope :private} nm tag)
+          n (kin/local-name ctx nm)
+          a (strip-parens (kin/render ctx start))
+          b (strip-parens (kin/render ctx end))]
+      (kin/emit! ctx (kin/indent-of ctx)
+                 "for " n " := " a "; " n " < " b "; " n "++ {\n")
+      (kin/scoped ctx {:key :in-loop :value true :indent 1}
+                  (fn [inner] (doseq [f body] (kin/statement! inner f))))
+      (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
+
 (defn go-forms
   "The Go arms. `:default-tag` means what it means above.
 
   A form absent here has no Go arm YET, and the group reports that by name
   rather than failing inside a render -- which is the reason this is a
-  separate map. `case`, `for`, `defstruct`, `defconst`, `defdata` and the
-  `declare*` family are the ones still missing."
+  separate map. `defstruct`, `defconst` and `defdata` are the ones still
+  missing."
   [{:keys [default-tag compound]}]
   (merge
    {'defn (go-defn default-tag)
@@ -1749,9 +1817,18 @@
     'continue (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "continue\n"))
     ;; TARGET-INDEPENDENT, so the SAME function the other three use. `//` is
     ;; Go's comment too, and `do` only re-emits its body.
+    'case go-case
+    'for (go-for default-tag)
     'comment comment-form
     'doc doc-form
-    'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))}
+    'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))
+    ;; THE `declare*` FAMILY IS TARGET-AGNOSTIC ALREADY. `declaring` asks the
+    ;; TARGET whether it hoists and how it spells a forward declaration, so
+    ;; Go -- which hoists at package level -- needs no arm, only the entry.
+    ;; Three more functions that would have been copies of themselves.
+    'declarefn (declaring :form true)
+    'declaretag (declaring :tag false)
+    'declarename (declaring :name false)}
    ;; EVERY OPERATOR IS SPELLED THE SAME IN GO -- `+ - * < > == ! >= <= != &&
    ;; || & | ^ / %` -- and `op-form` never looks at the target, so these are
    ;; the base map's functions rather than copies of them.
