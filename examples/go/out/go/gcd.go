@@ -9,7 +9,7 @@ func Gcd(a int, b int) int {
 	x := a
 	y := b
 	for y != 0 {
-		t := x % y
+		var t int = x % y
 		x = y
 		y = t
 	}

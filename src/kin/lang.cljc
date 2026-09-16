@@ -1452,14 +1452,20 @@
   project holds is that generated code may not be worse than the hand-
   written code it replaces -- which covers what a diff looks like as much as
   what it compiles to."
-  [ctx open close per-line xs]
+  ([ctx open close per-line xs] (array-literal ctx open close per-line xs false))
+  ([ctx open close per-line xs trailing-comma?]
   (if (<= (count xs) per-line)
     (str open (str/join ", " xs) close)
     (let [ind (kin/indent-of ctx)]
       (str open "\n"
            (str/join ",\n" (map (fn [row] (str ind "    " (str/join ", " row)))
                                 (partition-all per-line xs)))
-           "\n" ind close))))
+           ;; GO REQUIRES THE TRAILING COMMA when the brace is on its own
+           ;; line, and the other three do not care. Without it the file is a
+           ;; syntax error -- `unexpected newline in composite literal` --
+           ;; which is loud, but only once something compiles the output.
+           (when trailing-comma? ",")
+           "\n" ind close)))))
 
 (defn flat-array
   "The emitter for the common case: a flat sequence of numbers, with COUNT
@@ -1540,7 +1546,7 @@
        ;; saying so in the type is what Go does when it is fixed. `[...]T` is
        ;; a literal shorthand and not a type, so the count is written out.
        :go {:type (str "[" n "]" elem)
-            :expr (array-literal ctx (str "[" n "]" elem "{") "}" per-line xs)}
+            :expr (array-literal ctx (str "[" n "]" elem "{") "}" per-line xs true)}
        (throw (ex-info (str "kin.lang/flat-array does not speak " (t ctx)
                             " -- it lays a table out as an array literal, and"
                             " that is a thing to say per language rather than"
@@ -1801,23 +1807,26 @@
        (kin/emit! ctx (kin/indent-of ctx) "}\n")))})
 
 (defn- go-let
-  "`n := e`, always.
+  "`var n T = e` where the source DECLARED a tag, `n := e` where it did not.
 
-  The obvious alternative -- `var n T = e` wherever the source declared a tag,
-  so that declared beats inferred as it does everywhere else here -- was
-  written first and is WRONG, and the reason is worth keeping because it is
-  not a style argument.
+  THIS WAS WRONG TWICE AND THE SECOND ANSWER IS THE FIRST ONE, which is worth
+  recording in full because the argument that overturned it is wrong in a way
+  that sounds right.
 
-  Go has no implicit numeric conversion. If the declared tag and the
-  initialiser's type disagree, `var n int64 = e` does not coerce `e` -- it
-  fails to compile, exactly as `n := e` followed by a use expecting `int64`
-  would. So the `var` form protects against nothing; the compiler catches the
-  same mismatch either way, and all the annotation buys is noise.
+  The reasoning for `n := e` everywhere was: Go has no implicit numeric
+  conversion, so a declared tag disagreeing with the initialiser fails to
+  compile under either spelling, and the `var` form protects against nothing.
 
-  It cost a byte of output to find out, which is the drift gate doing its job:
-  `gofmt` is happy with both spellings and `./check` compiles both, so the
-  ONLY thing that noticed was the generated file differing from what was
-  committed."
+  THAT IGNORES UNTYPED CONSTANTS. `var used int32 = 0` is legal because `0`
+  is an untyped constant and converts; `used := 0` pins `used` to `int`, Go's
+  default. So a source saying `^I32` over a literal got `int` where it asked
+  for `int32`, and the first arithmetic mixing it with a real `int32` failed:
+
+      invalid operation: used + h (mismatched types int and int32)
+
+  Nothing caught it until a spike used a tag whose Go type was not `int` --
+  `examples/go` had spelled `I32` as `int`, which is what Go infers anyway, so
+  both forms compiled and the prettier one looked right."
   [default]
   (fn [ctx form]
     (let [[_ bindings & body] form]
@@ -1828,7 +1837,11 @@
               tag (or declared produced)
               n (kin/local-name ctx nm)]
           (kin/define-tag! ctx {:scope :private} nm tag)
-          (kin/emit! ctx (kin/indent-of ctx) n " := " code "\n")))
+          (kin/emit! ctx (kin/indent-of ctx)
+                     (if declared
+                       (str "var " n " " (get-in (or tag default) [:types :go])
+                            " = " code "\n")
+                       (str n " := " code "\n")))))
       (doseq [f body] (kin/statement! ctx f)))))
 
 (defn- go-local [default]

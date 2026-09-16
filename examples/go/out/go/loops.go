@@ -5,7 +5,7 @@ package loops
 const StepLimit int = 5
 
 func SumTo(n int) int {
-	acc := 0
+	var acc int = 0
 	for i := 0; i < n; i++ {
 		acc += i
 	}
