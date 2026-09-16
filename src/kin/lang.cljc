@@ -268,7 +268,19 @@
   (let [tg (or (kin/tag ctx tag) default)
         a (alias-of p)]
     (if (nil? a)
-      (get-in tg [:types (t ctx)])
+      ;; A TAG THAT HAS ANSWERED THE QUESTION MAKES IT COMPULSORY. Declaring
+      ;; `:shared` or `:copied` is the tag saying "the targets disagree about
+      ;; me", and once it has said that, a binding that says nothing is the
+      ;; original bug: one spelling meaning two things. Ceremony lands exactly
+      ;; where the ambiguity is and nowhere else -- a tag whose targets all
+      ;; agree declares neither and is used unmarked for ever.
+      (if (or (contains? tg :shared) (contains? tg :copied))
+        (throw (ex-info (str "kin: `" tag "` says the targets disagree about how it "
+                             "is passed, so `" p "` must say ^:shared or ^:copied "
+                             "-- unmarked, one spelling would mean the callee's "
+                             "writes are visible on some targets and not others")
+                        {:tag tag :symbol p}))
+        (get-in tg [:types (t ctx)]))
       (or (get-in tg [a (t ctx)])
           (throw (ex-info (str "kin: `" tag "` has no " a " rendering for "
                                (name (t ctx)) ", so `" p "` cannot be marked ^"

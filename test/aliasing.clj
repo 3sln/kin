@@ -85,9 +85,9 @@
 
 ;; 1. NOTHING ALREADY WRITTEN CHANGES. An unmarked parameter takes `:types`,
 ;;    which is the path every existing source is on.
-(let [src '[(defn ^:method f [^Rt rt ^I32Array xs] (return))]]
-  (has "1. unmarked renders `:types` on rust" "xs: Vec<i32>" (render :rust src))
-  (has "1. unmarked renders `:types` on java" "int[] xs" (render :java src)))
+(let [src '[(defn ^:method f [^Rt rt ^Blob b] (return))]]
+  (has "1. unmarked renders `:types` on rust" "b: Blob" (render :rust src))
+  (has "1. unmarked renders `:types` on java" "Blob b" (render :java src)))
 
 ;; 2. THE MARK READS THE TAG, and the tag is what differs per target. Rust
 ;;    spends a word here; Java and C# spend nothing, because an array is
@@ -135,6 +135,15 @@
      "must also say"
      (render-err :rust '[(defn ^:method sink [^Rt rt ^:shared ^HalfSaid h] (return))
                          (defn ^:method go [^Rt rt ^:shared ^HalfSaid g] (return (sink rt g)))]))
+
+;; 8. AND THE ANSWER IS COMPULSORY ONCE THE TAG HAS ADMITTED THE QUESTION.
+;;    `I32Array` declares `:shared`, which IS the admission -- so an unmarked
+;;    binding of it is the original bug and is refused. A tag whose targets
+;;    agree declares neither and stays unmarked for ever, which is every tag
+;;    already written.
+(has "8. an ambiguous tag cannot be used unmarked"
+     "must say ^:shared or ^:copied"
+     (render-err :rust '[(defn ^:method f [^Rt rt ^I32Array xs] (return))]))
 
 (println)
 (if (zero? @failures)
