@@ -26,17 +26,26 @@
   {:name 'I32Array
    :types {:rust "Vec<i32>" :java "int[]" :csharp "int[]"}
    :shared {:rust "&mut Vec<i32>" :java "int[]" :csharp "int[]"}
-   :copied {:rust "Vec<i32>" :java "int[]" :csharp "int[]"}})
+   :shared-arg {:rust "&mut {0}" :java "{0}" :csharp "{0}"}
+   :copied {:rust "Vec<i32>" :java "int[]" :csharp "int[]"}
+   :copied-arg {:rust "{0}.clone()" :java "{0}.clone()" :csharp "({0}.Clone() as int[])"}})
 
 ;; A tag that has NOT. Marking a binding with it must fail.
 (def Blob {:name 'Blob :types {:rust "Blob" :java "Blob" :csharp "Blob"}})
+
+;; A tag that says how a shared parameter is DECLARED and not how an argument
+;; to one is WRITTEN. Half an answer, which must be refused like none at all.
+(def HalfSaid
+  {:name 'HalfSaid
+   :types {:rust "Half" :java "Half" :csharp "Half"}
+   :shared {:rust "&mut Half" :java "Half" :csharp "Half"}})
 (def Rt* {:name 'Rt :types {:rust "Rt" :java "Rt" :csharp "Rt"}})
 (def I32 {:name 'I32 :types {:rust "i32" :java "int" :csharp "int"}})
 
 (def vocabulary
   {:namespace 'demo
    :targets #{:rust :java :csharp}
-   :tags {'I32Array I32Array 'Blob Blob 'Rt Rt* 'I32 I32}
+   :tags {'I32Array I32Array 'Blob Blob 'HalfSaid HalfSaid 'Rt Rt* 'I32 I32}
    :names {}
    :forms (core/forms {:default-tag I32})})
 
@@ -44,7 +53,7 @@
 
 (defn render [target forms]
   (let [vocabs {'demo vocabulary}
-        ns-form '(ns probe (:require [demo :refer [defn return I32Array Blob Rt I32]]))
+        ns-form '(ns probe (:require [demo :refer [defn return I32Array Blob HalfSaid Rt I32]]))
         scope (kin/require-scope ns-form vocabs)
         ctx (assoc (kin/context {} target)
                    :vocabs vocabs :scope-syms scope :vocab-order ['demo]
@@ -101,6 +110,31 @@
 (has "4. ^:shared and ^:copied together is refused"
      "both ^:shared and ^:copied"
      (render-err :rust '[(defn ^:method f [^Rt rt ^:shared ^:copied ^I32Array xs] (return))]))
+
+;; 5. THE CALL SITE HONOURS THE CALLEE'S MARK. A call cannot read the
+;;    callee's source, so the marks travel with the registered call -- and
+;;    Rust writes `&mut xs` where the others write `xs`. Without this the
+;;    parameter half is useless: the signature would want a reference and
+;;    every call would hand it a value.
+(let [src '[(defn ^:method sink [^Rt rt ^:shared ^I32Array xs] (return))
+            (defn ^:method go [^Rt rt ^:shared ^I32Array ys] (return (sink rt ys)))]]
+  (has "5. rust writes `&mut` at the call site" "sink(&mut ys)" (render :rust src))
+  (has "5. ... and java writes the bare name" "sink(rt, ys)" (render :java src)))
+
+;; 6. A COPY IS WORK ON THE OTHER SIDE, which is the case that shows this is
+;;    not a Rust-shaped concept: Rust hands the value over and Java must
+;;    clone, so the burden lands where the default was already sharing.
+(let [src '[(defn ^:method take [^Rt rt ^:copied ^I32Array xs] (return))
+            (defn ^:method go [^Rt rt ^:shared ^I32Array ys] (return (take rt ys)))]]
+  (has "6. java clones for a ^:copied parameter" "take(rt, ys.clone())" (render :java src)))
+
+;; 7. HALF AN ANSWER IS REFUSED. A tag that says how the parameter is
+;;    declared and not how the argument is written would compile on the
+;;    targets that need no word and fail on the one that does.
+(has "7. a tag that says the type but not the argument is refused"
+     "must also say"
+     (render-err :rust '[(defn ^:method sink [^Rt rt ^:shared ^HalfSaid h] (return))
+                         (defn ^:method go [^Rt rt ^:shared ^HalfSaid g] (return (sink rt g)))]))
 
 (println)
 (if (zero? @failures)

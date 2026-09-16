@@ -225,6 +225,38 @@
                            " which are the two answers to one question")
                       {:symbol p})))))
 
+(defn- alias-arg-key
+  "Where a tag states how an ARGUMENT is written for a mark.
+
+  Separate from the type key because they are different strings and neither
+  can be derived from the other: the type is `&mut Vec<i32>` and the argument
+  is `&mut {0}`, and on a target where an array is already shared both are
+  just the name."
+  [mark]
+  (clojure.core/get {:shared :shared-arg :copied :copied-arg} mark))
+
+(defn- arg-ref
+  "Render one ARGUMENT that is passed to an aliasing-marked parameter.
+
+  The parameter's type alone is not enough. Rust spells the parameter
+  `&mut Vec<i32>` and the argument `&mut xs`; Java spells both `xs`; a target
+  that COPIES may need `xs.clone()` here and nothing in the type. So the tag
+  states the argument form too, and a tag that states a type but not an
+  argument is refused -- half an answer would emit a call that does not
+  compile on one target and does on the others, which is the same divergence
+  one step further along."
+  [ctx default tag mark a]
+  (let [tg (or (kin/tag ctx tag) default)
+        k (alias-arg-key mark)]
+    (if-let [tpl (get-in tg [k (t ctx)])]
+      (str/replace tpl "{0}" a)
+      (throw (ex-info (str "kin: `" tag "` has no " k " rendering for "
+                           (name (t ctx)) ", so it cannot be passed to a ^"
+                           (name mark) " parameter -- a tag that says how a "
+                           (name mark) " parameter is DECLARED must also say "
+                           "how an argument to one is WRITTEN")
+                      {:tag tag :alias mark :target (t ctx)})))))
+
 (defn- pty-of
   "A PARAMETER's target type, honouring its aliasing mark.
 
@@ -462,6 +494,13 @@
           recv (when method? (first params))
           params (if method? (rest params) params)
           ps (partition 2 (interleave params (map (fn [p] (:tag (meta p))) params)))
+          ;; WHICH PARAMETERS ARE ALIASING-MARKED, captured here so the CALL
+          ;; can honour them. A call site cannot read the callee's source, so
+          ;; the answer travels with the registered call.
+          aliased (into {} (keep-indexed
+                            (fn [i [p tag]]
+                              (when-let [a (alias-of p)] [i [a tag]]))
+                            (mapv vec ps)))
           ty (partial ty-of ctx default)
           pty (partial pty-of ctx default)]
       ;; The receiver is spelled `self` in Rust and by its own name in the
@@ -498,7 +537,17 @@
           ;; same rule `delimited?` applies to a template, arrived at from the
           ;; other side: a declared call has no template to inspect, but its
           ;; shape guarantees what a template would have to prove.
-          (let [as (mapv strip-parens args)]
+          (let [as0 (mapv strip-parens args)
+                ;; A METHOD'S RECEIVER IS `args[0]` on every target -- Rust
+                ;; moves it in front of the dot and the others keep it in the
+                ;; list, but either way it is not `ps[0]`.
+                off (if method? 1 0)
+                as (vec (map-indexed
+                         (fn [ix a]
+                           (if-let [[mark tag] (clojure.core/get aliased (- ix off))]
+                             (arg-ref c default tag mark a)
+                             a))
+                         as0))]
             (str (if (or on-inst? (and method? (= :rust (t c))))
                    (str (first as) "." (target-name c nm)
                         "(" (str/join ", " (rest as)) ")")
