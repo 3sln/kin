@@ -191,6 +191,59 @@
 
 (defn- ty-of [ctx default tag] (get-in (or (kin/tag ctx tag) default) [:types (t ctx)]))
 
+;; --- ALIASING INTENT -------------------------------------------------------
+;;
+;; ORTHOGONAL TO `^:mut`, which is a different question wearing a similar
+;; word. `^:mut` says a binding is REASSIGNED: Rust needs `mut`, and the other
+;; targets emit nothing because they need nothing. This axis says whether a
+;; callee sees the CALLER'S STORAGE or a copy of it -- and that is the
+;; question the targets silently disagree about.
+;;
+;; A `Vec<i32>` parameter in Rust is copied; an `int[]` parameter in Java and
+;; C# is shared; a Go slice shares its backing array. So one source spelling
+;; means "the callee's writes are invisible" on one target and "the callee's
+;; writes are visible" on the others. Every target COMPILES. Nothing reports
+;; anything. That is the failure this axis exists to make unspellable.
+;;
+;; The mark does not say how to render -- the TAG says that, because what a
+;; shared `I32Array` looks like is a target's own business (`&mut Vec<i32>`
+;; here, `int[]` there). A tag that does not say cannot be marked, which is
+;; the whitelist: an unrepresentable combination fails by ABSENCE of data
+;; rather than by a rule somebody had to remember to write.
+(def ^:private alias-marks [:shared :copied])
+
+(defn- alias-of
+  "The aliasing mark on a binding, or nil. Both marks at once is a source
+  error: they are the two answers to one question."
+  [p]
+  (let [m (meta p)
+        marks (filterv #(clojure.core/get m %) alias-marks)]
+    (case (count marks)
+      0 nil
+      1 (first marks)
+      (throw (ex-info (str "kin: `" p "` is marked both ^:shared and ^:copied,"
+                           " which are the two answers to one question")
+                      {:symbol p})))))
+
+(defn- pty-of
+  "A PARAMETER's target type, honouring its aliasing mark.
+
+  Unmarked is `:types`, exactly as before -- so nothing already written
+  changes. Marked reads the tag's own entry for that mark, and a tag with no
+  such entry is an ERROR rather than a silent fall back to `:types`: falling
+  back would emit the very divergence the mark was written to prevent."
+  [ctx default p tag]
+  (let [tg (or (kin/tag ctx tag) default)
+        a (alias-of p)]
+    (if (nil? a)
+      (get-in tg [:types (t ctx)])
+      (or (get-in tg [a (t ctx)])
+          (throw (ex-info (str "kin: `" tag "` has no " a " rendering for "
+                               (name (t ctx)) ", so `" p "` cannot be marked ^"
+                               (name a) " -- the tag must say how EVERY target"
+                               " spells it, or the targets would not agree")
+                          {:tag tag :alias a :target (t ctx)}))))))
+
 ;; TWO QUESTIONS, NOT ONE, and this is where they are answered.
 ;;
 ;;   WHERE AM I?    the `:kin/unit` FRAME, read below by `qualifier`. Only
@@ -409,7 +462,8 @@
           recv (when method? (first params))
           params (if method? (rest params) params)
           ps (partition 2 (interleave params (map (fn [p] (:tag (meta p))) params)))
-          ty (partial ty-of ctx default)]
+          ty (partial ty-of ctx default)
+          pty (partial pty-of ctx default)]
       ;; The receiver is spelled `self` in Rust and by its own name in the
       ;; other two, so a body that says `(. rt gc)` comes out as `self.gc`
       ;; there and `rt.gc` here. Registering the NAME is all that takes.
@@ -484,7 +538,7 @@
                ;; says the thing and each target spends what it must.
                (str/join ", " (cons* (when recv (if (:mut (meta recv)) "&mut self" "&self"))
                                      (mapv (fn [[p tag]] (str (when (:mut (meta p)) "mut ")
-                                                              (kin/local-name ctx p) ": " (ty tag))) ps)))
+                                                              (kin/local-name ctx p) ": " (pty p tag))) ps)))
                ")"
                (cond
                  (and ret throws?) (str " -> Result<" (ty ret) ", String>")
@@ -508,7 +562,7 @@
                (if ret (ty ret) "void") " " (target-name ctx nm) "("
                (str/join ", " (cons* (when (and recv (not on-inst?))
                                        (str (ty (:tag (meta recv))) " " recv))
-                                     (mapv (fn [[p tag]] (str (ty tag) " " (kin/local-name ctx p))) ps))) ") {\n")
+                                     (mapv (fn [[p tag]] (str (pty p tag) " " (kin/local-name ctx p))) ps))) ") {\n")
         :csharp (kin/emit!
                  ctx (kin/indent-of ctx)
                  ;; C# class members default to PRIVATE where Java defaults to
@@ -519,7 +573,7 @@
                  (if ret (ty ret) "void") " " (target-name ctx nm) "("
                  (str/join ", " (cons* (when (and recv (not on-inst?))
                                          (str (ty (:tag (meta recv))) " " recv))
-                                       (mapv (fn [[p tag]] (str (ty tag) " " (kin/local-name ctx p))) ps))) ") {\n"))
+                                       (mapv (fn [[p tag]] (str (pty p tag) " " (kin/local-name ctx p))) ps))) ") {\n"))
       (let [wrap? (and unchecked? (= :csharp (t ctx)))
             ;; A FRESH TAG TABLE PER FUNCTION, seeded with the parameters.
             ;; Fresh because a table that outlived its function would let a
@@ -1757,7 +1811,8 @@
            recv (when method? (first params))
            params (if method? (rest params) params)
            ps (partition 2 (interleave params (map (fn [p] (:tag (meta p))) params)))
-           ty (partial ty-of ctx default)]
+           ty (partial ty-of ctx default)
+          pty (partial pty-of ctx default)]
        ;; VISIBILITY IS THE NAME in Go -- an exported identifier is
        ;; capitalised -- so `^:pub` reaches the target's `:fn-name` through the
        ;; metadata on `nm` and is spelled there, not decided here. That is the
@@ -1777,7 +1832,7 @@
        (kin/emit!
         ctx (kin/indent-of ctx)
         "func " (go-recv ctx recv default) (target-name ctx nm) "("
-        (str/join ", " (mapv (fn [[p tag]] (str (kin/local-name ctx p) " " (ty tag))) ps))
+        (str/join ", " (mapv (fn [[p tag]] (str (kin/local-name ctx p) " " (pty p tag))) ps))
         ") "
         ;; `^:throws` IS RUST'S SHAPE, SPELLED GO'S WAY. Rust turns the return
         ;; into `Result<T, String>` and appends `?` at the call; Go has no
