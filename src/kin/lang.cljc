@@ -643,6 +643,54 @@
   (doseq [line (rest form)]
     (kin/emit! ctx (kin/indent-of ctx) "// " line "\n")))
 
+(defn- doc-lines
+  "Doc lines, with anything RUST would read as a doctest fenced off.
+
+  An indented block in a Rust doc comment is not a diagram, it is CODE:
+  rustdoc collects it and `cargo test` compiles it. A kin doc string is
+  written once and emitted into three languages, and javadoc and the C# XML
+  pipeline both treat an indented block as prose -- so a layout sketch or a
+  before/after table, which is what these blocks almost always are, compiles
+  on one target and reads fine on the other two.
+
+  It has bitten twice. `1766808` was a layout diagram in `vectrans`; the
+  second was a formula written to record what an OLD implementation did, so
+  rustdoc went looking for functions that had just been deleted. Both were
+  fixed where they were written, which fixes one source and leaves the next
+  one to find out the same way.
+
+  So the CONVERSION handles it: on Rust, a run of indented lines is wrapped in
+  a ```text fence, which rustdoc shows as a block and does not compile. The
+  other two targets are untouched -- they never had the problem, and a fence
+  in a javadoc comment would be literal backticks on the page.
+
+  An explicit fence the author wrote is passed through as it is. Somebody who
+  writes ```rust in a kin doc string means it."
+  [ctx lines]
+  (if-not (= :rust (t ctx))
+    lines
+    ;; A DOC LINE IS NOT ALWAYS A STRING. `(doc ...)` takes whatever the source
+    ;; wrote, and a non-string element reaches here as itself -- so both tests
+    ;; ask before they look, and anything that is not a string is passed
+    ;; through untouched rather than being made to answer a regex.
+    (let [indented? (fn [l] (boolean (and (string? l) (re-find #"^(?:\s{4,}|\t)\S" l))))
+          fence? (fn [l] (boolean (and (string? l) (re-find #"^\s*```" l))))]
+      (loop [out [], auto? false, explicit? false, ls (seq lines)]
+        (if (nil? ls)
+          (if auto? (conj out "```") out)
+          (let [l (first ls), rest* (next ls)]
+            (cond
+              ;; The author's own fence: pass through, and stop guessing until
+              ;; it closes.
+              (fence? l) (recur (conj out l) auto? (not explicit?) rest*)
+              explicit? (recur (conj out l) auto? explicit? rest*)
+              (and (indented? l) (not auto?)) (recur (conj out "```text" l) true false rest*)
+              ;; A blank line does not end a block -- it is how a two-part
+              ;; diagram is written.
+              (and auto? (str/blank? l)) (recur (conj out l) true false rest*)
+              (and auto? (not (indented? l))) (recur (conj (conj out "```") l) false false rest*)
+              :else (recur (conj out l) auto? explicit? rest*))))))))
+
 (defn doc-form
   "`(doc \"line\" ...)` -- a DOC comment, `///` on all three.
 
@@ -652,7 +700,7 @@
   quietly demoted a documented function to an undocumented one in three
   runtimes at once."
   [ctx form]
-  (doseq [line (rest form)]
+  (doseq [line (doc-lines ctx (rest form))]
     (kin/emit! ctx (kin/indent-of ctx) "/// " line "\n")))
 
 (defn- field-form
@@ -1314,7 +1362,7 @@
                   :options (dissoc opts :data :path :key :emitter :accessors :doc)}))
            home (home-unit ctx)]
        (when doc
-         (doseq [line (str/split-lines doc)]
+         (doseq [line (doc-lines ctx (str/split-lines doc))]
            (kin/emit! ctx (kin/indent-of ctx) "/// " line "\n")))
        ;; THE BINDING IS OPTIONAL. A target that only wants accessors omits
        ;; `:type` and `:expr` and nothing is emitted; one that also wants the
@@ -1496,6 +1544,220 @@
                             " `:forward-declaration` to spell one.")
                        {:target (t ctx) :names (vec (rest form))})))))))}))
 
+;; ============================================================ GO, AS A SECOND MAP
+;;
+;; `kin.lang`'s forms above frame their output with a `case` over `:rust`,
+;; `:java` and `:csharp`, and the map below adds `:go` WITHOUT touching one of
+;; them. It is a second vocabulary map under the same `:namespace`, which is
+;; what namespace grouping is for: the group speaks four languages, no single
+;; map speaks all four, and a source requiring `kin.lang` gains Go with no
+;; change to its `ns` form.
+;;
+;; WHY IT LIVES IN THIS FILE rather than a namespace of its own: a Go `defn`
+;; needs `declared-call`, `qualifier`, `ty-of`, `home-unit` and `cons*`, all
+;; private here. A separate namespace would have to reimplement the cross-unit
+;; import logic -- the duplication this whole mechanism exists to delete -- or
+;; force kin to widen its public API for an internal need.
+;;
+;; IT IS DELIBERATELY SEPARATE rather than four arms in each `case`. A form
+;; with no Go arm yet is then a MISSING GROUP ENTRY, and the group's own error
+;; names the symbol and the target; folded in, the same gap would be a `case`
+;; falling through in the middle of a render. That is scaffolding with a
+;; defined end: when every form has an arm, the two maps merge and this
+;; comment goes with them.
+;;
+;; MOST OF THE DELTA IS THE SEMICOLON. Go ends no statement with one, spells
+;; every loop `for`, and brackets a condition like Rust rather than like Java.
+;; Where a form is genuinely target-independent -- every operator, `do` -- the
+;; Go map holds the SAME FUNCTION the others do, because a second copy of a
+;; function that does not branch is a second thing to keep in step.
+
+(defn- go-recv
+  "The receiver clause, or nil. Go spells a method `func (rt *Rt) Name(...)`,
+  which is nearer Rust's `impl` than to the statics Java and C# emit."
+  [ctx recv default]
+  (when recv
+    (str "(" (kin/local-name ctx recv) " " (ty-of ctx default (:tag (meta recv))) ") ")))
+
+(defn- go-defn
+  "`(defn ^I32 gcd [^I32 a ^I32 b] ...)` -- Go puts the type after the name.
+
+  `:declare` is shared with the base map's: registering a name is not a
+  per-language act, and writing it twice would be two things to keep in step."
+  [default]
+  {:declare
+   (fn [ctx form]
+     (let [nm (second form)]
+       (kin/define-form! ctx {:scope (if (:pub (meta nm)) :public :private)} nm {})))
+   :generate
+   (fn [ctx form]
+     (let [[_ nm params & body] form
+           ret (:tag (meta nm))
+           pub? (:pub (meta nm))
+           on-inst? (:instance (meta nm))
+           method? (or (:method (meta nm)) on-inst?)
+           recv (when method? (first params))
+           params (if method? (rest params) params)
+           ps (partition 2 (interleave params (map (fn [p] (:tag (meta p))) params)))
+           ty (partial ty-of ctx default)]
+       ;; VISIBILITY IS THE NAME in Go -- an exported identifier is
+       ;; capitalised -- so `^:pub` reaches the target's `:fn-name` through the
+       ;; metadata on `nm` and is spelled there, not decided here. That is the
+       ;; same division as everywhere else: the form says WHAT, the target HOW.
+       (kin/define-form!
+        ctx {:scope (if pub? :public :private)} nm
+        (declared-call
+         {:ret ret :home (home-unit ctx)}
+         (fn [c qualified args]
+           (let [as (mapv strip-parens args)]
+             (if method?
+               (str (first as) "." (target-name c nm)
+                    "(" (str/join ", " (rest as)) ")")
+               (str (qualified (target-name c nm))
+                    "(" (str/join ", " as) ")"))))))
+       (kin/emit!
+        ctx (kin/indent-of ctx)
+        "func " (go-recv ctx recv default) (target-name ctx nm) "("
+        (str/join ", " (mapv (fn [[p tag]] (str (kin/local-name ctx p) " " (ty tag))) ps))
+        ") " (when ret (str (ty ret) " ")) "{\n")
+       (let [ctx (assoc ctx :local-tags
+                        (atom (into {} (for [[p tag] (cons* (when recv [recv (:tag (meta recv))]) ps)
+                                             :let [tv (kin/tag ctx tag)]
+                                             :when tv]
+                                         [p tv]))))]
+         (kin/scoped
+          ctx {:key :fn :value nm :indent 1}
+          (fn [inner]
+            (kin/scoped inner {:key :throws :value (:throws (meta nm))}
+                        (fn [in2] (doseq [f body] (kin/statement! in2 f)))))))
+       (kin/emit! ctx (kin/indent-of ctx) "}\n")))})
+
+(defn- go-let
+  "`n := e`, always.
+
+  The obvious alternative -- `var n T = e` wherever the source declared a tag,
+  so that declared beats inferred as it does everywhere else here -- was
+  written first and is WRONG, and the reason is worth keeping because it is
+  not a style argument.
+
+  Go has no implicit numeric conversion. If the declared tag and the
+  initialiser's type disagree, `var n int64 = e` does not coerce `e` -- it
+  fails to compile, exactly as `n := e` followed by a use expecting `int64`
+  would. So the `var` form protects against nothing; the compiler catches the
+  same mismatch either way, and all the annotation buys is noise.
+
+  It cost a byte of output to find out, which is the drift gate doing its job:
+  `gofmt` is happy with both spellings and `./check` compiles both, so the
+  ONLY thing that noticed was the generated file differing from what was
+  committed."
+  [default]
+  (fn [ctx form]
+    (let [[_ bindings & body] form]
+      (doseq [[nm init] (partition 2 bindings)]
+        (let [{code :text produced :tag} (kin/render-tagged ctx init)
+              code (strip-parens code)
+              declared (kin/tag ctx (:tag (meta nm)))
+              tag (or declared produced)
+              n (kin/local-name ctx nm)]
+          (kin/define-tag! ctx {:scope :private} nm tag)
+          (kin/emit! ctx (kin/indent-of ctx) n " := " code "\n")))
+      (doseq [f body] (kin/statement! ctx f)))))
+
+(defn- go-local [default]
+  (fn [ctx form]
+    (let [nm (second form)
+          tag (kin/tag ctx (:tag (meta nm)))]
+      (kin/define-tag! ctx {:scope :private} nm tag)
+      (kin/emit! ctx (kin/indent-of ctx)
+                 "var " (kin/local-name ctx nm) " "
+                 (get-in (or tag default) [:types :go]) "\n"))))
+
+(defn- go-return [ctx form]
+  (if (= 1 (count form))
+    (kin/emit! ctx (kin/indent-of ctx) "return\n")
+    (kin/emit! ctx (kin/indent-of ctx) "return "
+               (strip-parens (kin/render ctx (second form))) "\n")))
+
+(defn- go-set [table]
+  (fn [ctx form]
+    (let [[_ place value] form
+          p (kin/render ctx place)
+          cmp (when (seq? value) (head-op table ctx (first value)))]
+      (if (and cmp (= 3 (count value)) (= p (kin/render ctx (second value))))
+        (kin/emit! ctx (kin/indent-of ctx) p " " cmp " "
+                   (strip-parens (kin/render ctx (nth value 2))) "\n")
+        (kin/emit! ctx (kin/indent-of ctx) p " = "
+                   (strip-parens (kin/render ctx value)) "\n")))))
+
+(declare go-if-body)
+
+(defn- go-if [ctx form]
+  (kin/emit! ctx (kin/indent-of ctx))
+  (go-if-body ctx form))
+
+(defn- go-if-body [ctx form]
+  (let [[_ test then else] form]
+    (kin/emit! ctx "if " (strip-parens (kin/render ctx test)) " {\n")
+    (kin/scoped ctx {:key :in-if :value true :indent 1}
+                (fn [inner] (kin/statement! inner then)))
+    (cond
+      (and else (seq? else) (= 'if (first else)) (head-is-if? ctx else))
+      (do (kin/emit! ctx (kin/indent-of ctx) "} else ")
+          (kin/scoped ctx {:key :else-if :value true}
+                      (fn [inner] (go-if-body inner else))))
+      else
+      (do (kin/emit! ctx (kin/indent-of ctx) "} else {\n")
+          (kin/scoped ctx {:key :in-if :value true :indent 1}
+                      (fn [inner] (kin/statement! inner else)))
+          (kin/emit! ctx (kin/indent-of ctx) "}\n"))
+      :else (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
+
+(defn- go-while
+  "Go spells every loop `for`, and `for c {` is the whole of a while."
+  [ctx form]
+  (let [[_ test & body] form]
+    (kin/emit! ctx (kin/indent-of ctx)
+               "for " (strip-parens (kin/render ctx test)) " {\n")
+    (kin/scoped ctx {:key :in-loop :value true :indent 1}
+                (fn [inner] (doseq [f body] (kin/statement! inner f))))
+    (kin/emit! ctx (kin/indent-of ctx) "}\n")))
+
+(defn- go-forever [ctx form]
+  (kin/emit! ctx (kin/indent-of ctx) "for {\n")
+  (kin/scoped ctx {:key :in-loop :value true :indent 1}
+              (fn [inner] (doseq [f (rest form)] (kin/statement! inner f))))
+  (kin/emit! ctx (kin/indent-of ctx) "}\n"))
+
+(defn go-forms
+  "The Go arms. `:default-tag` means what it means above.
+
+  A form absent here has no Go arm YET, and the group reports that by name
+  rather than failing inside a render -- which is the reason this is a
+  separate map. `case`, `for`, `defstruct`, `defconst`, `defdata` and the
+  `declare*` family are the ones still missing."
+  [{:keys [default-tag compound]}]
+  (merge
+   {'defn (go-defn default-tag)
+    'let (go-let default-tag)
+    'local (go-local default-tag)
+    'return go-return
+    'set (go-set (merge base-compound compound))
+    'if go-if
+    'while go-while
+    'forever go-forever
+    'break (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "break\n"))
+    'continue (fn [ctx _] (kin/emit! ctx (kin/indent-of ctx) "continue\n"))
+    ;; TARGET-INDEPENDENT, so the SAME function the other three use. `//` is
+    ;; Go's comment too, and `do` only re-emits its body.
+    'comment comment-form
+    'doc doc-form
+    'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))}
+   ;; EVERY OPERATOR IS SPELLED THE SAME IN GO -- `+ - * < > == ! >= <= != &&
+   ;; || & | ^ / %` -- and `op-form` never looks at the target, so these are
+   ;; the base map's functions rather than copies of them.
+   (reduce (fn [m s] (assoc m s (op-form s))) {} (keys ops))))
+
+
 (defn forms
   "The shape forms. `:default-tag` is the tag an untagged name is given, which
   is a per-subject choice and so is asked for rather than assumed.
@@ -1567,6 +1829,10 @@
   way. `kin.lang` is one vocabulary that ships in the box, not the language."
   #{:rust :java :csharp})
 
+(def go-targets
+  "The one this file's Go map speaks."
+  #{:go})
+
 (def vocabulary
   "`kin.lang` as an ordinary vocabulary, requireable from a source:
 
@@ -1579,8 +1845,20 @@
   has to say what it is. A subject that wants an untagged local to mean
   something calls `forms` with a `:default-tag` and merges the result
   instead, which is what every vocabulary in the tree does today."
-  {:namespace 'kin.lang
-   :targets targets
-   :tags {}
-   :names {}
-   :forms (forms {:default-tag nil})})
+  [{:namespace 'kin.lang
+    :targets targets
+    :tags {}
+    :names {}
+    :forms (forms {:default-tag nil})}
+
+   ;; THE SAME NAMESPACE, a different language. See the GO block above: the
+   ;; group speaks four, no single map speaks four, and a source requiring
+   ;; `kin.lang` needs no change to gain Go. A VECTOR rather than a map is
+   ;; what `load-vocabulary` splices, and it is why the self-naming check
+   ;; applies only to the single case -- a file holding several cannot be
+   ;; named after all of them.
+   {:namespace 'kin.lang
+    :targets go-targets
+    :tags {}
+    :names {}
+    :forms (go-forms {:default-tag nil})}])

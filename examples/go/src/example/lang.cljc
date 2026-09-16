@@ -56,101 +56,19 @@
 (defn- ty [ctx tag] (get-in (kin/tag ctx tag) [:types (t ctx)]))
 (defn- fn-name [ctx nm] ((get-in ctx [:targets (t ctx) :fn-name]) ctx nm))
 
-;; ---------------------------------------------------------------- Go's arms
+;; ------------------------------------------------- Go arrives from kin.lang
 ;;
-;; ONE ARM EACH, not two. Every function below is what Go needs and nothing
-;; else -- no `case`, no second branch, and no mention of Java anywhere. A
-;; map that declares `:targets #{:go}` is never asked about another target,
-;; which is what makes a single-language extension honest rather than a
-;; three-armed form with two arms left empty.
-
-(defn- go-defn
-  "`(defn ^I32 gcd [^I32 a ^I32 b] ...)` -- Go puts the type after the name.
-
-  It also DECLARES the name, so a later form in the same file can call it,
-  and registers its return tag so a caller knows what it got."
-  [ctx form]
-  (let [[_ nm params & body] form
-        ret (:tag (meta nm))]
-    ;; `:public` means LOCAL AND EXPORTED: a `defn` here is callable from the
-    ;; rest of its own file and from any file that requires it.
-    (kin/define-form!
-     ctx {:scope :public} nm
-     (fn [c f]
-       (kin/tagged! c (kin/tag c ret))
-       (let [as (mapv (fn [x] (kin/render c x)) (rest f))]
-         (kin/emit! c (fn-name c nm) "(" (str/join ", " as) ")"))))
-    ;; PUBLIC, because a module exists to be consumed -- and in Go that is
-    ;; spelled by capitalising, which the target's `:fn-name` namer does.
-    (kin/emit!
-     ctx (kin/indent-of ctx)
-     "func " (fn-name ctx nm) "("
-     (str/join ", " (mapv (fn [p] (str (kin/local-name ctx p) " "
-                                       (ty ctx (:tag (meta p)))))
-                          params))
-     ") " (when ret (str (ty ctx ret) " ")) "{\n")
-    ;; A PARAMETER'S TAG HAS TO BE REGISTERED, or an unannotated `let` in the
-    ;; body has nothing to infer from. `kin.lang`'s `defn` does this, and a
-    ;; vocabulary that writes its own owes it too -- forgetting it is
-    ;; invisible in Go, where `x := a` needs no type, and was invisible here
-    ;; for exactly as long as this file also wrote Java's `defn`.
-    (kin/scoped
-     ctx {:key :fn :value nm :indent 1}
-     (fn [inner]
-       (doseq [p params]
-         (kin/define-tag! inner {:scope :private} p (kin/tag inner (:tag (meta p)))))
-       (doseq [f body] (kin/statement! inner f))))
-    (kin/emit! ctx (kin/indent-of ctx) "}\n")))
-
-(defn- go-return [ctx form]
-  (kin/emit! ctx (kin/indent-of ctx) "return"
-             (if (second form)
-               (str " " (core/strip-parens (kin/render ctx (second form))))
-               "")
-             "\n"))
-
-(defn- go-set
-  "`(set x v)`. Go's `:=` declares and `=` assigns, and which one a line wants
-  is a fact about whether the name is new -- so the source says it: `let`
-  declares, `set` assigns."
-  [ctx form]
-  (kin/emit! ctx (kin/indent-of ctx) (kin/render ctx (second form))
-             " = " (core/strip-parens (kin/render ctx (nth form 2)))
-             "\n"))
-
-(defn- go-let
-  "`:=` declares AND infers, so the output needs no type -- but the TAG is
-  still registered, because a later form asking what `x` is has to get an
-  answer whether or not Go wrote one down."
-  [ctx form]
-  (let [[_ bindings & body] form]
-    (doseq [[nm init] (partition 2 bindings)]
-      (let [{:keys [text tag]} (kin/render-tagged ctx init)]
-        (kin/define-tag! ctx {:scope :private} nm
-                         (or (kin/tag ctx (:tag (meta nm))) tag))
-        (kin/emit! ctx (kin/indent-of ctx)
-                   (kin/local-name ctx nm) " := " (core/strip-parens text) "\n")))
-    (doseq [f body] (kin/statement! ctx f))))
-
-(defn- go-while
-  "Go spells every loop `for`, and `for (y != 0)` is legal Go that nobody
-  writes -- the test is a whole expression with nothing to bind to, which is
-  the safe case to strip."
-  [ctx form]
-  (kin/emit! ctx (kin/indent-of ctx)
-             "for " (core/strip-parens (kin/render ctx (second form))) " {\n")
-  (kin/scoped ctx {:key :loop :value true :indent 1}
-              (fn [inner] (doseq [f (drop 2 form)] (kin/statement! inner f))))
-  (kin/emit! ctx (kin/indent-of ctx) "}\n"))
-
-(defn- go-comment [ctx form]
-  (doseq [line (rest form)] (kin/emit! ctx (kin/indent-of ctx) "// " line "\n")))
-
-(defn- go-op [sym result]
-  (fn [ctx form]
-    (let [as (mapv (fn [f] (kin/render ctx f)) (rest form))]
-      (kin/tagged! ctx result)
-      (kin/emit! ctx (str "(" (str/join (str " " sym " ") as) ")")))))
+;; THIS FILE USED TO CARRY GO'S SHAPE FORMS -- `defn`, `let`, `set`, `while`,
+;; `return`, `comment` and three operators, one arm each, contributed as a
+;; second map under `:namespace 'kin.lang`. They are gone, because `kin.lang`
+;; now ships its own Go map and a namespace may not have two maps answering
+;; for one target: that is two statements of one fact, and kin refuses it by
+;; name rather than letting declaration order pick.
+;;
+;; So the example is back to carrying only what is ITS OWN -- three tags and
+;; one form -- which is what a project using kin should have to write. The
+;; deletion is the point: every arm removed here is an arm every other kin
+;; project no longer writes either.
 
 ;; ------------------------------------------------------------- the subject
 
@@ -182,31 +100,15 @@
                 (kin/emit! ctx "Objects.toString(" x ")")))))
 
 (def vocabulary
-  "TWO MAPS: this example's subject, and Go added to `kin.lang`.
+  "ONE MAP AGAIN, and that is the news.
 
-  A vector rather than a map, which `load-vocabulary` splices. The order is
-  the group's tie-break where two maps both speak a target and both hold a
-  symbol -- these two share no symbol at all, so it is only determinism."
-  [{:namespace 'example.lang
-    :targets #{:go :java}
-    :tags {'I32 I32 'Bool Bool 'Str Str}
-    :names {}
-    :literal-tag (fn [v] (when (integer? v) I32))
-    :forms {'to-str to-str}}
-
-   {:namespace 'kin.lang
-    ;; GO ONLY. `kin.lang`'s own map speaks `:rust`, `:java` and `:csharp`,
-    ;; so the namespace speaks four languages out of two maps and no single
-    ;; map speaks all four -- which is exactly the thing that could not be
-    ;; said before.
-    :targets #{:go}
-    :tags {} :names {}
-    :forms {'defn go-defn
-            'return go-return
-            'let go-let
-            'set go-set
-            'while go-while
-            'comment go-comment
-            '!= (go-op "!=" Bool)
-            '> (go-op ">" Bool)
-            'rem (go-op "%" I32)}}])
+  This was a vector of two while the example supplied Go's shape forms
+  itself. `kin.lang` ships them now, so what is left is the subject: the
+  tags this example's source annotates with, and the one form that needs a
+  different import in each language."
+  {:namespace 'example.lang
+   :targets #{:go :java}
+   :tags {'I32 I32 'Bool Bool 'Str Str}
+   :names {}
+   :literal-tag (fn [v] (when (integer? v) I32))
+   :forms {'to-str to-str}})
