@@ -1140,9 +1140,20 @@
   already do about a constant."
   [target nm]
   (let [parts (str/split (str nm) #"-")]
-    (if (= :csharp target)
+    (cond
+      (= :csharp target)
       (str/join (mapv str/capitalize parts))
-      (str/join "_" (mapv str/upper-case parts)))))
+
+      ;; GO IS MIXEDCAPS, for the reason `const-name` gives: Effective Go and
+      ;; `golint` both reject a screaming name, and `^:pub` picks the first
+      ;; letter because Go has no visibility keyword.
+      (= :go target)
+      (let [pascal (str/join (mapv str/capitalize parts))]
+        (if (:pub (meta nm))
+          pascal
+          (str (str/lower-case (subs pascal 0 1)) (subs pascal 1))))
+
+      :else (str/join "_" (mapv str/upper-case parts)))))
 
 (defn- table-reference
   "What a reference to the TABLE ITSELF becomes, wherever it is written.
@@ -1400,6 +1411,10 @@
             ;; `static readonly`, not `const`: C# `const` admits no array.
             :csharp (str (if pub? "public " "internal ") "static readonly "
                          (:type out) " " bound " = " (:expr out) ";\n")
+            ;; Go has no module-level `const` for a composite, so a table is
+            ;; a `var`. Visibility is already in `bound`, which `data-name`
+            ;; spelled from `^:pub`.
+            :go (str "var " bound " " (:type out) " = " (:expr out) "\n")
             (throw (ex-info
                     (str "kin: `(defdata " nm " ...)` has a binding to emit"
                          " for " (t ctx) " and kin.lang does not know how"
@@ -1521,6 +1536,11 @@
               :expr (array-literal ctx "{" "}" per-line xs)}
        :csharp {:type (str elem "[]")
                 :expr (array-literal ctx (str "new " elem "[] {") "}" per-line xs)}
+       ;; `[N]T` rather than `[]T`, mirroring Rust: the length is known and
+       ;; saying so in the type is what Go does when it is fixed. `[...]T` is
+       ;; a literal shorthand and not a type, so the count is written out.
+       :go {:type (str "[" n "]" elem)
+            :expr (array-literal ctx (str "[" n "]" elem "{") "}" per-line xs)}
        (throw (ex-info (str "kin.lang/flat-array does not speak " (t ctx)
                             " -- it lays a table out as an array literal, and"
                             " that is a thing to say per language rather than"
@@ -1862,7 +1882,7 @@
 
   A form absent here has no Go arm YET, and the group reports that by name
   rather than failing inside a render -- which is the reason this is a
-  separate map. `defdata` is the one still missing."
+  separate map. Every form in the base map now has an entry here."
   [{:keys [default-tag compound]}]
   (merge
    {'defn (go-defn default-tag)
@@ -1884,6 +1904,12 @@
     ;; targets now that `const-spellings` asks about all of them.
     'defconst {:declare (:declare defconst-form) :generate go-defconst}
     'defstruct (go-defstruct default-tag)
+    ;; THE BASE MAP'S OWN FUNCTION. `defdata` was target-independent apart
+    ;; from one line -- how a target spells a module-level binding -- so Go
+    ;; got an arm in that `case` rather than a second copy of forty lines
+    ;; that would then be two things to keep in step. `kin.lang/flat-array`
+    ;; learned Go the same way.
+    'defdata (defdata-form default-tag)
     ;; `.` IS ALREADY FOUR-LANGUAGE. It renders the object, a dot, and the
     ;; field through the target's `:local-name` -- and Go spells a field
     ;; access with a dot like everyone else. The base map's own function.

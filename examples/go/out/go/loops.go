@@ -31,3 +31,9 @@ type Span struct {
 	lo int
 	hi int
 }
+
+var Squares [6]int = [6]int{0, 1, 4, 9, 16, 25}
+
+func SquareOf(i int) int {
+	return Squares[i]
+}

@@ -55,10 +55,18 @@ import (
 
 func main() {
 	fmt.Println(gcd.Gcd(12, 18), gcd.GcdLabel(42, 63),
-		loops.SumLimit(), loops.Classify(2))
+		loops.SumLimit(), loops.Classify(2), loops.SquareOf(4))
 }
 MAIN
-go_out=$(cd "$work/go" && go run . 2>&1)
+# NOT a bare command substitution. Under `set -e` a failing `go run` aborts
+# the script here, which captures the compiler's message into the variable
+# and then throws it away -- the check exits 1 having printed nothing at all.
+# A gate that fails without saying why costs more than it saves.
+if ! go_out=$(cd "$work/go" && go run . 2>&1); then
+  echo "  FAIL go refused the generated code:"
+  printf '%s\n' "$go_out" | sed 's/^/    /'
+  exit 1
+fi
 
 # --- Java -------------------------------------------------------------------
 JDK="${FLINT_JDK:-/opt/homebrew/opt/openjdk}"
@@ -69,12 +77,21 @@ cat > "$work/java/Main.java" <<'MAIN'
 public class Main {
     public static void main(String[] args) {
         System.out.println(example.Gcd.gcd(12, 18) + " " + example.Gcd.gcdLabel(42, 63)
-                           + " " + example.Loops.sumLimit() + " " + example.Loops.classify(2));
+                           + " " + example.Loops.sumLimit() + " " + example.Loops.classify(2)
+                           + " " + example.Loops.squareOf(4));
     }
 }
 MAIN
-(cd "$work/java" && "$JDK/bin/javac" -d . example/Gcd.java example/Loops.java Main.java)
-java_out=$(cd "$work/java" && "$JDK/bin/java" Main)
+if ! javac_out=$(cd "$work/java" && "$JDK/bin/javac" -d . example/Gcd.java example/Loops.java Main.java 2>&1); then
+  echo "  FAIL javac refused the generated code:"
+  printf '%s\n' "$javac_out" | sed 's/^/    /'
+  exit 1
+fi
+if ! java_out=$(cd "$work/java" && "$JDK/bin/java" Main 2>&1); then
+  echo "  FAIL the Java program did not run:"
+  printf '%s\n' "$java_out" | sed 's/^/    /'
+  exit 1
+fi
 
 echo "  go     $go_out"
 echo "  java   $java_out"
@@ -86,8 +103,8 @@ fails=0
 if [ "$go_out" != "$java_out" ]; then
   echo "  FAIL the two targets disagree"; fails=1
 fi
-if [ "$go_out" != "6 21 10 200" ]; then
-  echo "  FAIL expected \`6 21 10 200\`, got \`$go_out\`"; fails=1
+if [ "$go_out" != "6 21 10 200 16" ]; then
+  echo "  FAIL expected \`6 21 10 200 16\`, got \`$go_out\`"; fails=1
 fi
 [ "$fails" -eq 0 ] || exit 1
 echo "  ok   two sources, two languages, same answers -- and BOTH languages' shape forms came from kin.lang"

@@ -18,6 +18,7 @@
   the hand-written code imports it."
   (:require [clojure.string :as str]
             [kin]
+            [kin.lang :as core]
             [kin.vfs :as vfs]))
 
 (def go-reserved
@@ -141,6 +142,11 @@
 
 (def targets
   {:go {:key :go
+        ;; WHICH EMITTER LAYS A `defdata` OUT, by qualified name. There is no
+        ;; default -- a fallback cannot know what an accessor MEANS -- so a
+        ;; declaration names one and the target says what that name is here,
+        ;; beside `:indent-unit` and `:local-name`.
+        :data-emitters {'kin.lang/flat-array core/flat-array}
         :ext "go"
         :line-comment "//"
         ;; GO INDENTS WITH TABS, and `gofmt` rewrites anything else. kin
@@ -159,6 +165,7 @@
         :path (fn [ns-name] (str (last-seg ns-name) ".go"))}
 
    :java {:key :java
+          :data-emitters {'kin.lang/flat-array core/flat-array}
           :ext "java"
           :line-comment "//"
           :reserved java-reserved

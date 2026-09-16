@@ -18,7 +18,7 @@
 ;; compares strings.
 (ns example.loops
   (:require [example.lang :refer [I32]]
-            [kin.lang :refer [defn return let set for case defconst defstruct +]]))
+            [kin.lang :refer [defn return let set for case defconst defstruct defdata +]]))
 
 ;; A constant, which each language spells its own way: Rust and Java scream
 ;; it, C# and GO pascalise it -- Effective Go says `MixedCaps`, never
@@ -57,3 +57,25 @@
 ;; struct type at package level, Java a static nested class, and the field
 ;; names go through the same namer `(. p x)` would read them with.
 (defstruct span [^I32 lo ^I32 hi])
+
+;; A DATA TABLE, laid out by `kin.lang/flat-array` -- Rust `[T; N]`, Java and
+;; C# `T[]`, and Go `[N]T`, which mirrors Rust because the length is known
+;; and saying so in the type is what Go does when it is fixed.
+;;
+;; THE FIRST ACCESSOR ARGUMENT IS THE RECEIVER SLOT, `{0}`, which
+;; `flat-array` says a module-level table has no use for. flint passes its
+;; runtime there; this example has nothing to pass, so it passes `0` and the
+;; generated body ignores it. Arity is what picks the template: one argument
+;; is the LENGTH, two is an INDEX.
+;;
+;; The accessors are ORDINARY BINDINGS -- they go through `declared-call`,
+;; the same machinery a `defn` call uses -- so `(squares-at 0 i)` is a call
+;; like any other and the source never learns which target is reading it.
+(defdata ^:pub squares
+  :emitter kin.lang/flat-array
+  :data [0 1 4 9 16 25]
+  :accessors {^I32 squares-n  [^I32 ignored]
+              ^I32 squares-at [^I32 ignored ^I32 i]})
+
+(defn ^:pub ^I32 square-of [^I32 i]
+  (return (squares-at 0 i)))

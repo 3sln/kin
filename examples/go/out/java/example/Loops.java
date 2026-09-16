@@ -32,4 +32,10 @@ public final class Loops {
         int lo;
         int hi;
     }
+
+    public static final int[] SQUARES = {0, 1, 4, 9, 16, 25};
+
+    public static int squareOf(int i) {
+        return SQUARES[i];
+    }
 }
