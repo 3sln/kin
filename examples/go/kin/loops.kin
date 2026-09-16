@@ -1,0 +1,33 @@
+;; The counted loop and the switch, in two languages that spell both
+;; differently.
+;;
+;; `gcd.kin` exercises `defn`, `let`, `set`, `while`, `return` and the
+;; operators. This one exists for `for` and `case`, which diverge more than
+;; anything else in the shape vocabulary:
+;;
+;;   * Go writes `for i := 0; i < n; i++` and Java `for (int i = 0; ...)` --
+;;     C-shaped in both, but Go takes the counter's type from the start
+;;     expression and has no parentheses.
+;;   * Go's `switch` needs no `break` because it does not fall through, and
+;;     puts every label of an arm on one `case` separated by commas. Java
+;;     needs one `case` per label and `return`s out of each arm to avoid
+;;     falling into the next.
+;;
+;; Neither difference shows up in a file that generates but is never
+;; compiled, which is why this is in `./check` rather than in a test that
+;; compares strings.
+(ns example.loops
+  (:require [example.lang :refer [I32]]
+            [kin.lang :refer [defn return let set for case +]]))
+
+(defn ^I32 sum-to [^I32 n]
+  (let [^I32 acc 0]
+    (for [^I32 i 0 n]
+      (set acc (+ acc i)))
+    (return acc)))
+
+(defn ^I32 classify [^I32 x]
+  (case x
+    [0] 100
+    [1 2] 200
+    :else 300))

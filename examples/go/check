@@ -9,18 +9,24 @@
 # nothing that would go red if it stopped being true.
 #
 # It matters more than an example usually would, because this example IS the
-# acceptance test for namespace-grouped vocabularies. The Go arms of `defn`,
-# `let`, `while`, `set`, `return` and the operators come from a map this
-# project contributes to `kin.lang`, and the JAVA arms come from `kin.lang`
-# itself -- one source, one `ns` form naming `kin.lang` once, two maps
-# answering for different targets. If that were quietly not happening the
-# files would still generate; only compiling and running them says so.
+# acceptance test for namespace-grouped vocabularies. BOTH languages' shape
+# forms now come from `kin.lang` -- Go from the `#{:go}` map it ships beside
+# its three-language one -- so a source names `kin.lang` once and two maps
+# answer for different targets. If that were quietly not happening the files
+# would still generate; only compiling and running them says so.
+#
+# `loops.kin` is here for `for` and `case`, which diverge more than anything
+# else in the shape vocabulary: Go's `switch` does not fall through and takes
+# comma-separated labels, and its `for` has no parentheses and infers the
+# counter's type. None of that shows up in a file that generates and is never
+# compiled.
 set -e
 cd "$(dirname "$0")"
 work=$(mktemp -d "${TMPDIR:-/tmp}/kin-go-example.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 ./emit kin/gcd.kin > /dev/null
+./emit kin/loops.kin > /dev/null
 
 # gofmt is the tightest check available on the Go side and it is free: it
 # rewrites anything it does not like, so "no output" means the generated file
@@ -30,8 +36,9 @@ gofmt -l out/go/ | while read -r f; do
 done
 
 # --- Go ---------------------------------------------------------------------
-mkdir -p "$work/go/gcd"
+mkdir -p "$work/go/gcd" "$work/go/loops"
 cp out/go/gcd.go "$work/go/gcd/gcd.go"
+cp out/go/loops.go "$work/go/loops/loops.go"
 cat > "$work/go/go.mod" <<'MOD'
 module example
 
@@ -43,10 +50,12 @@ package main
 import (
 	"fmt"
 	"example/gcd"
+	"example/loops"
 )
 
 func main() {
-	fmt.Println(gcd.Gcd(12, 18), gcd.GcdLabel(42, 63))
+	fmt.Println(gcd.Gcd(12, 18), gcd.GcdLabel(42, 63),
+		loops.SumTo(5), loops.Classify(2))
 }
 MAIN
 go_out=$(cd "$work/go" && go run . 2>&1)
@@ -59,11 +68,12 @@ cp -R out/java/example "$work/java/"
 cat > "$work/java/Main.java" <<'MAIN'
 public class Main {
     public static void main(String[] args) {
-        System.out.println(example.Gcd.gcd(12, 18) + " " + example.Gcd.gcdLabel(42, 63));
+        System.out.println(example.Gcd.gcd(12, 18) + " " + example.Gcd.gcdLabel(42, 63)
+                           + " " + example.Loops.sumTo(5) + " " + example.Loops.classify(2));
     }
 }
 MAIN
-(cd "$work/java" && "$JDK/bin/javac" -d . example/Gcd.java Main.java)
+(cd "$work/java" && "$JDK/bin/javac" -d . example/Gcd.java example/Loops.java Main.java)
 java_out=$(cd "$work/java" && "$JDK/bin/java" Main)
 
 echo "  go     $go_out"
@@ -76,8 +86,8 @@ fails=0
 if [ "$go_out" != "$java_out" ]; then
   echo "  FAIL the two targets disagree"; fails=1
 fi
-if [ "$go_out" != "6 21" ]; then
-  echo "  FAIL expected \`6 21\`, got \`$go_out\`"; fails=1
+if [ "$go_out" != "6 21 10 200" ]; then
+  echo "  FAIL expected \`6 21 10 200\`, got \`$go_out\`"; fails=1
 fi
 [ "$fails" -eq 0 ] || exit 1
-echo "  ok   one source, two languages, same answer -- and Java's shape forms came from kin.lang"
+echo "  ok   two sources, two languages, same answers -- and BOTH languages' shape forms came from kin.lang"
