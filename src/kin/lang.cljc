@@ -1611,6 +1611,36 @@
 ;; Go map holds the SAME FUNCTION the others do, because a second copy of a
 ;; function that does not branch is a second thing to keep in step.
 
+(defn- go-zero-of
+  "The Go zero value for `tag`, from the tag's own `:zero`.
+
+  ONLY GO NEEDS ONE. Rust's `?` propagates without naming a value and an
+  exception unwinds, so this is data no other target asks a tag for.
+
+  IT CANNOT BE DERIVED. Guessing from the spelling breaks on the first named
+  type: `type Length int` zeroes to `0` and `type Rect struct{...}` zeroes to
+  `Rect{}`, and the name says nothing about which. So the tag carries it --
+  the tag mechanism used as intended, since kin never looks inside one and a
+  form reads whatever the vocabulary put there.
+
+  AND IT REFUSES rather than emitting nothing. `check-vocabulary` guarantees
+  `:types` and cannot guarantee this, so a tag without a `:zero` is not
+  merely unannotated -- it cannot be the return of a fallible function in Go
+  at all, and saying so by name is the whole difference between this and the
+  empty string this project keeps removing."
+  [ctx default tag fn-nm]
+  (let [tv (or (kin/tag ctx tag) default)]
+    (or (get-in tv [:zero :go])
+        (throw (ex-info
+                (str "kin: `(defn ^:throws ^" tag " " fn-nm " ...)` returns"
+                     " `(" (get-in tv [:types :go]) ", error)` in Go, so the"
+                     " error path has to name a zero -- and the tag `" tag
+                     "` carries no `:zero` for :go. Add one beside its"
+                     " `:types`, as `:zero {:go \"0\"}`. It cannot be derived:"
+                     " a named type zeroes differently from how it is"
+                     " spelled.")
+                {:tag tag :target :go :fn fn-nm})))))
+
 (defn- go-recv
   "The receiver clause, or nil. Go spells a method `func (rt *Rt) Name(...)`,
   which is nearer Rust's `impl` than to the statics Java and C# emit."
@@ -1633,6 +1663,7 @@
      (let [[_ nm params & body] form
            ret (:tag (meta nm))
            pub? (:pub (meta nm))
+           throws? (:throws (meta nm))
            on-inst? (:instance (meta nm))
            method? (or (:method (meta nm)) on-inst?)
            recv (when method? (first params))
@@ -1658,7 +1689,17 @@
         ctx (kin/indent-of ctx)
         "func " (go-recv ctx recv default) (target-name ctx nm) "("
         (str/join ", " (mapv (fn [[p tag]] (str (kin/local-name ctx p) " " (ty tag))) ps))
-        ") " (when ret (str (ty ret) " ")) "{\n")
+        ") "
+        ;; `^:throws` IS RUST'S SHAPE, SPELLED GO'S WAY. Rust turns the return
+        ;; into `Result<T, String>` and appends `?` at the call; Go has no
+        ;; postfix operator, so it returns `(T, error)` and the call expands.
+        ;; Java and C# ignore the mark, because an exception needs nothing.
+        (cond
+          (and ret throws?) (str "(" (ty ret) ", error) ")
+          throws? "error "
+          ret (str (ty ret) " ")
+          :else "")
+        "{\n")
        (let [ctx (assoc ctx :local-tags
                         (atom (into {} (for [[p tag] (cons* (when recv [recv (:tag (meta recv))]) ps)
                                              :let [tv (kin/tag ctx tag)]
@@ -1667,8 +1708,25 @@
          (kin/scoped
           ctx {:key :fn :value nm :indent 1}
           (fn [inner]
-            (kin/scoped inner {:key :throws :value (:throws (meta nm))}
-                        (fn [in2] (doseq [f body] (kin/statement! in2 f)))))))
+            (kin/scoped
+             inner {:key :throws :value throws?}
+             (fn [in2]
+               ;; WHAT A CALL SITE IN THIS BODY NEEDS TO PROPAGATE AN ERROR:
+               ;; the zero to put in the value slot, and a counter so the
+               ;; temporaries it hoists are named deterministically. Both are
+               ;; facts about the ENCLOSING function, which is why they are
+               ;; scoped here and not computed at the call.
+               (kin/scoped
+                ;; ONLY WHEN IT CAN FAIL. Asking for a zero on every function
+                ;; with a return type refuses tags that never needed one --
+                ;; `gcd-label` returns `Str` and cannot fail, and demanding
+                ;; `:zero` of it broke the example.
+                in2 {:key :go-zero :value (when (and ret throws?)
+                                            (go-zero-of ctx default ret nm))}
+                (fn [in3]
+                  (kin/scoped
+                   in3 {:key :go-temps :value (atom 0)}
+                   (fn [in4] (doseq [f body] (kin/statement! in4 f)))))))))))
        (kin/emit! ctx (kin/indent-of ctx) "}\n")))})
 
 (defn- go-let
@@ -1711,11 +1769,19 @@
                  "var " (kin/local-name ctx nm) " "
                  (get-in (or tag default) [:types :go]) "\n"))))
 
-(defn- go-return [ctx form]
-  (if (= 1 (count form))
-    (kin/emit! ctx (kin/indent-of ctx) "return\n")
-    (kin/emit! ctx (kin/indent-of ctx) "return "
-               (strip-parens (kin/render ctx (second form))) "\n")))
+(defn- go-return
+  "`return v`, or `return v, nil` from a function that can fail.
+
+  The `nil` is the error slot saying this path did not. Rust spells the same
+  thing `Ok(v)` and for the same reason; Java and C# spell it by saying
+  nothing, because a function that did not throw simply returns."
+  [ctx form]
+  (let [throws? (kin/get ctx :throws)]
+    (if (= 1 (count form))
+      (kin/emit! ctx (kin/indent-of ctx) (if throws? "return nil\n" "return\n"))
+      (kin/emit! ctx (kin/indent-of ctx) "return "
+                 (strip-parens (kin/render ctx (second form)))
+                 (if throws? ", nil" "") "\n"))))
 
 (defn- go-set [table]
   (fn [ctx form]

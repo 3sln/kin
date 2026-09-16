@@ -48,7 +48,13 @@
             [kin.lang :as core]
             [clojure.string :as str]))
 
-(def I32 {:name 'I32 :types {:go "int" :java "int"}})
+(def I32 {:name 'I32 :types {:go "int" :java "int"}
+          ;; ONLY GO ASKS FOR THIS. `^:throws` makes a Go function return
+          ;; `(int, error)`, so the error path has to name a zero -- Rust's
+          ;; `?` propagates without one and an exception unwinds. A tag
+          ;; without it cannot be the return of a fallible function in Go,
+          ;; which makes it incomplete rather than merely unannotated.
+          :zero {:go "0"}})
 (def Bool {:name 'Bool :types {:go "bool" :java "boolean"}})
 (def Str {:name 'Str :types {:go "string" :java "String"}})
 
