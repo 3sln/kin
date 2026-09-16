@@ -488,6 +488,89 @@
    :fn-name (namer pascal #(str "@" %) csharp-reserved)
    :emit (module-emitter #(module-unit :csharp %) csharp-file)})
 
+(def go-reserved
+  "Go's twenty-five keywords, and the predeclared identifiers a generated
+  name must not collide with either. `len`, `cap`, `new` and `make` are not
+  keywords -- they can be shadowed, legally -- but a generated `func Len` that
+  shadows the builtin inside its own package is the kind of code the not-worse
+  rule exists to refuse."
+  #{"break" "case" "chan" "const" "continue" "default" "defer" "else"
+    "fallthrough" "for" "func" "go" "goto" "if" "import" "interface" "map"
+    "package" "range" "return" "select" "struct" "switch" "type" "var"
+    "append" "cap" "close" "complex" "copy" "delete" "imag" "len" "make"
+    "new" "panic" "print" "println" "real" "recover"})
+
+(defn go-namer
+  "Go spells VISIBILITY IN THE NAME, so `^:pub` decides the first letter.
+
+  This is the first of kin's namers that reads the symbol's METADATA, and it
+  is why `namer` could not simply be reused: Rust has `pub`, Java has
+  `public` and C# has `internal`, so for those three the spelling and the
+  visibility are independent and a namer needs only the symbol. Go has no
+  keyword at all -- an identifier is exported exactly when it begins with an
+  upper-case letter -- so the two questions are one question here.
+
+  `locals?` is the other half. A local variable and a parameter are never
+  exported, so they are always lower camel; only a top-level name asks about
+  `^:pub`. Passing the wrong one gives a capitalised local, which compiles
+  and is wrong in the way `golint` will tell you about."
+  [locals?]
+  (fn [ctx sym]
+    (let [pascal-str (pascal (str sym))
+          lower (str (str/lower-case (subs pascal-str 0 1)) (subs pascal-str 1))
+          s (if (and (not locals?) (:pub (meta sym))) pascal-str lower)]
+      (if-not (contains? go-reserved s)
+        s
+        ;; NO ESCAPE. Go has no raw-identifier syntax -- Rust's `r#type`, C#'s
+        ;; `@class` -- so a collision is refused by name, as it is for Java.
+        (throw (ex-info (str "kin: `" s "` is a keyword or a predeclared"
+                             " identifier in Go, which has no escape for"
+                             " either -- rename it in the source")
+                        {:name s :target :go}))))))
+
+(defn- go-file
+  "A Go MODULE: banner, `package`, the import block, then the body.
+
+  Nearer `rust-file` than `java-file` -- there is no wrapper type, because Go
+  has top-level functions and a method carries its receiver on the `func`
+  itself, which `kin.lang`'s Go `defn` already emits. So no `impl` runs to
+  partition and no class to open.
+
+  THE IMPORT BLOCK IS WRITTEN AGAINST AN ANCHOR, like every other target's
+  header, so an import discovered deep in a function body still appears at the
+  top. Go's parenthesised form is used even for one import, because `gofmt`
+  leaves both alone and a block that grows by a line reads better in a diff
+  than one that changes shape."
+  [ctx forms]
+  (let [ns-name (second (ns-form-of forms))
+        body (body-of forms)]
+    (banner! ctx "//" ns-name)
+    (kin/emit! ctx "package " (last (str/split (str ns-name) #"\.")) "\n\n")
+    (with-unit
+      ctx (unit-of ctx ns-name)
+      (fn [needs]
+        (str "import (\n"
+             (str/join (map (fn [n] (str "\t\"" (unit-import n) "\"\n")) needs))
+             ")\n"))
+      (fn [inner] (emit-body inner body)))))
+
+(def go
+  "Go, as a target. `:vfs` and `:path` are the project's, as for the other
+  three -- and so, for now, is `:unit`: Go needs TWO spellings where the
+  others need one, an import path absolute from the module root for the
+  header and a bare package name for a reference, and the module root is
+  something kin cannot know. See nome's ROADMAP P0.4c."
+  {:key :go :ext "go" :line-comment "//" :doc-comment "//"
+   :indent-unit "\t"
+   :reserved go-reserved
+   :local-name (go-namer true)
+   :fn-name (go-namer false)
+   ;; GO HOISTS AT PACKAGE LEVEL -- a function may be called above its
+   ;; definition -- so `declare*` emits nothing, as it does for the other
+   ;; three, and no `:forward-declaration` is needed.
+   :hoists? true
+   :emit go-file})
+
 (defn- rust-forward
   "Rust has no forward declaration for an inherent method, and does not need
   one: items in a `impl` block are visible to each other regardless of order.
@@ -522,6 +605,6 @@
                           [(str (if capitalise? (pascal tail) tail) "." ext)]))))
 
 (def defaults
-  "The three kin ships with. A project takes these, extends them, replaces
+  "The four kin ships with. A project takes these, extends them, replaces
   them, or supplies its own entirely -- they carry no special status."
-  {:rust rust :java java :csharp csharp})
+  {:rust rust :go go :java java :csharp csharp})
