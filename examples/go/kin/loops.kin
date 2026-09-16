@@ -18,7 +18,7 @@
 ;; compares strings.
 (ns example.loops
   (:require [example.lang :refer [I32]]
-            [kin.lang :refer [defn return let set for case defconst +]]))
+            [kin.lang :refer [defn return let set for case defconst defstruct +]]))
 
 ;; A constant, which each language spells its own way: Rust and Java scream
 ;; it, C# and GO pascalise it -- Effective Go says `MixedCaps`, never
@@ -44,3 +44,16 @@
 ;; answer there and would have emitted nothing at all.
 (defn ^:pub ^I32 sum-limit []
   (return (sum-to STEP_LIMIT)))
+
+;; A STRUCT, DECLARED ONLY, and the limit is worth stating rather than
+;; hiding: `defstruct` has no constructor form, and its own tag cannot be
+;; used as an annotation either -- `kin/tag` resolves through the file's
+;; REQUIRE SCOPE, so a tag `define-tag!` registers while generating is not
+;; reachable as `^span` on a parameter. That is true of all four targets and
+;; predates Go; see the note in nome's ROADMAP.
+;;
+;; So what this checks is that the DECLARATION compiles in both languages,
+;; which is weaker than everything else in this file. Go writes a named
+;; struct type at package level, Java a static nested class, and the field
+;; names go through the same namer `(. p x)` would read them with.
+(defstruct span [^I32 lo ^I32 hi])

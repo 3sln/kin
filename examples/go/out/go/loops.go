@@ -26,3 +26,8 @@ func Classify(x int) int {
 func SumLimit() int {
 	return SumTo(StepLimit)
 }
+
+type Span struct {
+	lo int
+	hi int
+}

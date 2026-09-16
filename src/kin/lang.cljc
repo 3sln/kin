@@ -1830,12 +1830,39 @@
     (kin/define-name!
      ctx {:scope (if pub? :public :private)} nm (const-reference ctx nm))))
 
+(defn- go-defstruct
+  "`type Pt struct { ... }` -- a type declaration, not a class.
+
+  Rust wants a `struct`, Java and C# a class with fields, and Go a named
+  struct type. The field names go through `kin/local-name`, which is what
+  `field-form` uses to READ one -- so a declaration and an access agree by
+  construction rather than by two functions being kept in step.
+
+  FIELDS STAY UNEXPORTED, and that is a consequence rather than a choice: a
+  generated module is a package, `defstruct` has no constructor form, and so
+  a struct declared here is built and read inside its own package. A consumer
+  that ever needs to reach one from outside is asking the target how it
+  spells a field, not this form."
+  [default]
+  (fn [ctx form]
+    (let [[_ nm fields] form
+          fs (mapv (fn [f] [f (:tag (meta f))]) fields)
+          pascal (str/join (mapv str/capitalize (str/split (str nm) #"-")))]
+      (kin/define-tag! ctx {:scope (if (:pub (meta nm)) :public :private)} nm
+                       {:name nm :types (zipmap (keys (:targets ctx))
+                                                (repeat pascal))})
+      (kin/emit! ctx (kin/indent-of ctx) "type " pascal " struct {\n")
+      (doseq [[f tag] fs]
+        (kin/emit! ctx (kin/indent-of ctx) "\t" (kin/local-name ctx f) " "
+                   (ty-of ctx default tag) "\n"))
+      (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
+
 (defn go-forms
   "The Go arms. `:default-tag` means what it means above.
 
   A form absent here has no Go arm YET, and the group reports that by name
   rather than failing inside a render -- which is the reason this is a
-  separate map. `defstruct` and `defdata` are the ones still missing."
+  separate map. `defdata` is the one still missing."
   [{:keys [default-tag compound]}]
   (merge
    {'defn (go-defn default-tag)
@@ -1856,6 +1883,11 @@
     ;; per-language act, and `const-reference` already answers for four
     ;; targets now that `const-spellings` asks about all of them.
     'defconst {:declare (:declare defconst-form) :generate go-defconst}
+    'defstruct (go-defstruct default-tag)
+    ;; `.` IS ALREADY FOUR-LANGUAGE. It renders the object, a dot, and the
+    ;; field through the target's `:local-name` -- and Go spells a field
+    ;; access with a dot like everyone else. The base map's own function.
+    '. field-form
     'comment comment-form
     'doc doc-form
     'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))

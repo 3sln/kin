@@ -27,4 +27,9 @@ public final class Loops {
     public static int sumLimit() {
         return sumTo(STEP_LIMIT);
     }
+
+    static final class Span {
+        int lo;
+        int hi;
+    }
 }
