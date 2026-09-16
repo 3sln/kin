@@ -1456,9 +1456,14 @@
   ([ctx open close per-line xs trailing-comma?]
   (if (<= (count xs) per-line)
     (str open (str/join ", " xs) close)
-    (let [ind (kin/indent-of ctx)]
+    (let [ind (kin/indent-of ctx)
+          ;; THE TARGET'S INDENT UNIT, not four spaces. Rust, Java and C#
+          ;; indent with four, so a literal `"    "` was right for all three
+          ;; and wrong the moment a target indented with anything else: Go
+          ;; uses tabs, and `gofmt` rewrites a table indented with spaces.
+          unit (get-in ctx [:targets (t ctx) :indent-unit] "    ")]
       (str open "\n"
-           (str/join ",\n" (map (fn [row] (str ind "    " (str/join ", " row)))
+           (str/join ",\n" (map (fn [row] (str ind unit (str/join ", " row)))
                                 (partition-all per-line xs)))
            ;; GO REQUIRES THE TRAILING COMMA when the brace is on its own
            ;; line, and the other three do not care. Without it the file is a
@@ -1515,7 +1520,14 @@
               ;; -- `{0}` is the receiver, which a module-level table has no
               ;; use for.
               (let [e (if stride (str "{1} * " stride " + {2}") "{1}")]
-                (if (= :rust target) (str "(" e ") as usize") e)))]
+                (cond
+                  (= :rust target) (str "(" e ") as usize")
+                  ;; GOFMT TIGHTENS AN INDEX BY PRECEDENCE -- `Boxes[i*2+0]`,
+                  ;; not `Boxes[i * 2 + 0]` -- and rewrites the file if it is
+                  ;; spaced. The other three are left alone either way, so
+                  ;; this is Go's spelling rather than a change of layout.
+                  (= :go target) (if stride (str "{1}*" stride "+{2}") "{1}")
+                  :else e)))]
     (doseq [{:keys [name arity]} accessors]
       (when (zero? arity)
         (throw (ex-info (str "kin.lang/flat-array: `" name "` takes no"

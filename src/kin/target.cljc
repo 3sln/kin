@@ -552,7 +552,16 @@
         (str "import (\n"
              (str/join (map (fn [n] (str "\t\"" (unit-import n) "\"\n")) needs))
              ")\n"))
-      (fn [inner] (emit-body inner body)))))
+      ;; A BLANK LINE BETWEEN TOP-LEVEL FORMS, which Go alone asks for.
+      ;; `gofmt` leaves two adjacent `func`s alone, so kin's house style of
+      ;; no separator held until a `defdata` put a multi-line `var` next to
+      ;; one -- gofmt inserts a blank line there and rewrites the file. Being
+      ;; the thing that separates forms is why `:emit` drives the loop rather
+      ;; than handing kin a prefix and a suffix.
+      (fn [inner]
+        (doseq [[i f] (map-indexed vector body)]
+          (when (pos? i) (kin/emit! inner "\n"))
+          (kin/statement! inner f))))))
 
 (def go
   "Go, as a target. `:vfs` and `:path` are the project's, as for the other
