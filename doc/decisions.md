@@ -702,6 +702,140 @@ not confusing in the way the other was: `report` is the whole, and
 
 ---
 
+## O — A namespace is a GROUP of vocabulary maps
+
+`doc/redesign.md:1444`, verbatim, is where the whole redesign came from:
+
+> namespaces aren't target-coupled like I'd intended, and it's not clear that
+> they can be overridden. Which leads to the problem that we have all the
+> `lang.kin` forms, but if the user wants to extend them to a new language,
+> there's no clear path for them.
+
+`:targets` on a vocabulary answered the first half and first-match-wins
+require order the second. THE THIRD HALF WAS NEVER DONE, and the README
+admitted it under "The sharp edge, stated plainly": adding a fourth language
+to an existing three-language source meant writing your own shape vocabulary
+with four arms, because `kin.lang`'s speak three.
+
+**Decided: several vocabulary maps may share a `:namespace`.** A project
+groups every map it has by the namespace it names, preserving declared order,
+and resolving a symbol walks that group for the first map that BOTH speaks
+the current target AND holds the symbol.
+
+The rejected alternatives, so they are not re-proposed:
+
+* **per-form `:targets` metadata.** Asymmetric -- tags and names already
+  carry per-target data that `check-vocabulary` reads -- and per-entry
+  narrowing would WEAKEN that check.
+* **a require-order chain across differently-named vocabularies.** Works, and
+  forces every source's `ns` form to list the extension, which is the
+  coupling being complained about.
+
+### It is a CONSOLIDATION. Three mechanisms became one.
+
+kin already did per-target form dispatch in two other places, both
+one-map-per-namespace workarounds, and both said so:
+
+* `kin.host/form-entry` -- "a link fn that picks the target's at CALL time",
+  throwing `is annotated for rust java and not for :csharp`;
+* `kin.project/export-vocabulary` -- the same shape, and its docstring said
+  as much: "answering it twice in two shapes would be two things to keep in
+  step".
+
+Both are DELETED. Each now contributes one map per target and the group walk
+picks. Their two hand-written errors became one, in `kin/group-miss`, which
+can say something neither could: which maps DO hold the symbol and what each
+of them speaks.
+
+### `:literal-tag` -- which map of a group answers
+
+**Decided: the first map that SPEAKS THIS TARGET and carries one.** Require
+order is walked first and the group in declared order within it, so it is the
+same two-level first-match every other resolution uses.
+
+The alternative was to let any map answer whether or not it speaks the
+target, on the grounds that a literal's tag is a fact about the source rather
+than about a language. That is wrong for the case grouping exists to serve: a
+Go extension may want `5` to mean something a `u32` does not, and a map that
+cannot speak the target cannot be asked what its types are --
+`check-vocabulary` only guarantees a tag has a type for the targets ITS OWN
+map claims, so a tag borrowed across that line is exactly the missing-type
+silence the check exists to prevent.
+
+### The host/hand clash -- narrowed, not removed
+
+A namespace declared both by a host tree's annotations and by a hand-written
+vocabulary used to be REFUSED outright, naming it, because the annotations
+exist BECAUSE the hand-written table drifted, and a project holding both is
+holding the drift it meant to remove.
+
+**Decided: the refusal narrows to one symbol declared for one target by two
+maps.** Grouping makes coexistence expressible, and the blanket refusal would
+block the case grouping is FOR -- a host tree declaring a namespace for Rust
+and a hand-written map extending it to Go restates nothing.
+
+What the refusal was really about is two statements of the same fact, and
+that is exactly a `(symbol, target)` pair claimed twice. Disjoint targets are
+extension; the same symbol for a different target is extension; the same
+symbol for the SAME target is the drift, and it is still refused -- naming
+the symbol and the target rather than just the namespace.
+
+Three details of the shape, each decided rather than fallen into:
+
+* it applies to **every group**, not only host-versus-hand, because the
+  hazard is not about where a map came from. Two hand-written maps colliding
+  would have been resolved silently by declared order.
+* **declared order is a tie-break, not an override mechanism.** Override is
+  require order, which a SOURCE chooses and `source-origins` reports. Nobody
+  chose a group's internal order as a way to shadow anything, so an ambiguity
+  inside a group is an error rather than a silent win.
+* **the identical entry twice is not drift.** `require-scope`'s `put` set
+  this precedent -- an entry equal to the one already held is no shadowing at
+  all -- and an extension restating a tag it needs for its own target is one
+  fact written twice. It bites for tags and names and essentially never for
+  forms, which is right: two closures are not `=`, so two implementations for
+  one target stay ambiguous, which they are.
+
+### What it costs, stated rather than discovered
+
+Extending a namespace WIDENS what every source requiring it generates for.
+The namespace speaks Go once a Go map joins it, so every source using it
+generates Go. A partial extension is therefore a thing to finish or to
+exclude with `:kin/only`, and a symbol it did not cover is an error naming
+the symbol and the target -- not `not in scope`, which would be false.
+
+`kin.lang` itself cannot be checked for completeness this way, because forms
+are functions and `check-vocabulary` cannot ask one what it covers. That is
+the same reason `kin.lang/call` names a missing target at render time, and
+the new error is the group-shaped version of it.
+
+### The `(val (first by-target))` bug, measured before it was changed
+
+`export-vocabulary` took tags and names as `(val (first by-target))` -- ONE
+TARGET'S ENTRY USED FOR ALL OF THEM -- reasoning that a tag carries its own
+per-target `:types` and a name its own per-target spellings, so whichever you
+picked was the same value.
+
+That is true of everything `kin.lang` builds and false in general.
+Instrumenting the current code and running flint's emit found **sixteen
+divergent cases, eight distinct exported names, all function-valued** --
+`spell-name`'s `(fn [ctx] -> String)` shape, which is a fresh closure per
+target and therefore never `=` to its siblings.
+
+**The bug was LATENT, not active.** Those closures come from
+`const-reference` and `table-reference`, which capture the declaring
+namespace and a FULL per-target spelling map and read the reference site's
+target out of the `ctx` they are handed -- so any of the three behaves
+identically. That is why flint's output is byte-identical either side of this
+change, and it is the whole of the backward-compatibility proof.
+
+What would have been silently wrong: a vocabulary whose `define-name!` or
+`define-tag!` value depended on the target it was declared under -- a
+single-target spelling map, say. `spell-name` would then have answered nil
+for two of three targets, which is the empty-string-in-the-output silence
+`check-vocabulary` exists to prevent. Grouping fixes it by construction,
+because each target's map holds that target's own entry.
+
 ## What kin owes, after both corrections
 
 The corrections narrow kin's job, which is the point of them. On tags, all of

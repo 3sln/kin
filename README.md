@@ -101,7 +101,7 @@ cannot.
 **`examples/go`** is this, end to end, and it runs:
 
 ```
-cd examples/go && ./emit kin/gcd.kin
+cd examples/go && ./check
 ```
 
 One source becomes a **Go module file** and a **Java class file**:
@@ -127,8 +127,14 @@ public final class Gcd {
 
 **kin produces modules; the language consumes them.** Nothing is split across
 files and no language needs a partial anything — something new is created and
-the hand-written code imports it. `gofmt` has nothing to reformat, `javac`
-compiles clean, and both print `6 21` when called.
+the hand-written code imports it. `./check` generates both, compiles both,
+runs both and requires the same answer: `gofmt` has nothing to reformat,
+`javac` is clean, and both print `6 21`. That claim used to be this
+paragraph and nothing else, checked by hand once.
+
+**Java's `defn`, `let`, `while` and `return` in that example are
+`kin.lang`'s.** Only the Go arms are the example's own, contributed as a
+second map under `:namespace 'kin.lang` — see §4.
 
 Three files, none of which kin knows anything about:
 
@@ -189,21 +195,43 @@ protocol implementation, and neither can be written in EDN.
 The generated Go is what `gofmt` would have written — checked, not asserted:
 `gofmt -l` has nothing to say about it.
 
-### The sharp edge, stated plainly
+### Extending a namespace to a new language
 
-`kin.lang`'s forms frame their output with a three-armed `case` over `:rust`,
-`:java` and `:csharp`. So the example above writes its own `defn`, `let` and
-`while` rather than reusing `kin.lang`'s.
+**Several vocabulary maps may share a `:namespace`.** A project's
+vocabularies are grouped by the namespace they name, and a reference walks
+its group for the first map that *both* speaks the current target *and* holds
+the symbol. So `examples/go` contributes
 
-For a source that generates **only** for your new language, that is fine and
-is what the example does. For adding a fourth language to an **existing**
-three-language source, it is not: you need forms that speak all four, and
-`kin.lang`'s speak three. Today that means writing your own shape vocabulary
-with four arms.
+```clojure
+{:namespace 'kin.lang :targets #{:go} :forms {'defn ... 'let ... 'while ...}}
+```
 
-kin.lang's *helpers* are reusable even when its forms are not — the example
-uses `kin.lang/strip-parens`, which knows how to drop an expression's outer
-parentheses safely and was got right the hard way.
+and a source that says `(:require [kin.lang :refer [defn let while]])` gets
+Go's `defn` from that map and Java's from `kin.lang` itself. **The `ns` form
+does not change**, and that is the whole point: a require-order chain would
+also work and would force every source to name the extension.
+
+A map that declares `:targets #{:go}` is never asked about another target, so
+a single-language extension is one arm per form rather than a three-armed
+form with two arms left empty. `kin.lang` is not edited, not forked, and not
+required under a second name.
+
+**What this costs.** Extending a namespace widens what every source requiring
+it generates for — the namespace now speaks Go, so a source using it
+generates Go too. A *partial* extension is therefore a thing to finish or to
+exclude with `:kin/only`, and a symbol the extension did not cover is an
+error naming the symbol, the target, and which maps do hold it.
+
+**Restating is refused, extending is not.** Two maps of a group declaring the
+same symbol for the same target is two statements of one fact, and the order
+they were listed in would silently pick one — so it is refused, naming the
+symbol and the target. The identical entry twice is fine; so is the same
+symbol for a different target, which is what an extension *is*.
+
+`source-origins` reports which map answered, per target, and lists under
+`:split` the symbols whose answering map differs between targets. For a
+project with one map per namespace that list is empty, which is the
+backward-compatibility claim in one number.
 
 ## 4. `kin.lang` is one vocabulary that ships in the box
 
@@ -213,6 +241,10 @@ and the others do not (`^:mut`, `^:inline`, `^:unchecked`, `^:throws`,
 `^:method`). Every form in it is one a user could have written, and it
 declares `:targets #{:rust :java :csharp}` because that is what its `case`
 arms actually cover.
+
+**A fourth language is added to it, not forked from it.** Contribute a map
+naming `:namespace 'kin.lang` with `:targets #{:your-language}`, and every
+existing source that requires `kin.lang` gains it. See §3.
 
 **It can be shadowed, and shadowing is the override path.** The first require
 wins:
