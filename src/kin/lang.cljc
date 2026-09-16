@@ -1648,6 +1648,76 @@
   (when recv
     (str "(" (kin/local-name ctx recv) " " (ty-of ctx default (:tag (meta recv))) ") ")))
 
+(defn- go-propagate
+  "A call to a fallible function, expanded where Rust would write `?`.
+
+  Rust's `?` is a POSTFIX EXPRESSION OPERATOR, so `(+ (f a) (g b))` stays one
+  expression there: `f(a)? + g(b)?`. Go has nothing of the kind, so the check
+  is a statement and the call has to leave expression position -- it is
+  hoisted into a temporary through `kin/before!`, which kin documents as
+  existing because `hoisting a temporary is the common case`, and what the
+  enclosing expression sees is the temporary's name.
+
+      t1, e1 := Halve(n)
+      if e1 != nil {
+          return 0, e1
+      }
+      ... t1 ...
+
+  THE ZERO AND THE COUNTER ARE THE ENCLOSING FUNCTION'S, not the callee's,
+  which is why `go-defn` scopes them: what this call returns on failure is
+  whatever the function CONTAINING it must return, and the temporaries have
+  to be numbered per function to be deterministic (§7 of nome's SPEC, and
+  kin's own rule that generation is a function of the source).
+
+  CALLING A FALLIBLE FUNCTION FROM ONE THAT IS NOT IS REFUSED BY NAME. Rust
+  makes this a compile error -- `?` in a function returning `T` does not
+  build -- and Go would instead silently drop the error on the floor, which
+  is the worse of the two failures and the one worth spending an error on."
+  [ctx callee ret call]
+  (let [counter (kin/get ctx :go-temps)]
+    ;; WHERE A HOIST WOULD CHANGE WHAT RUNS, REFUSE. `before!` puts the call
+    ;; above the statement being built, which is right in an ordinary
+    ;; expression and wrong in two places -- a short-circuit operand, which
+    ;; would then run unconditionally, and a loop test, which would then run
+    ;; once. Both were verified to produce silently wrong code before this
+    ;; check existed. Refusing is not the final answer for either (see nome's
+    ;; ROADMAP P0.2f/g) but it is the honest one: a named error beats output
+    ;; that compiles and means something else.
+    (when-let [why (kin/get ctx :go-no-hoist)]
+      (throw (ex-info
+              (str "kin: `" callee "` is `^:throws`, so calling it in Go"
+                   " hoists the call and its error check above the statement"
+                   " -- and this call is in " why ", where that changes what"
+                   " runs. Rust's `?` has no such problem because it is an"
+                   " expression operator. Bind the result to a `let` first,"
+                   " where the hoist is what you meant.")
+              {:callee callee :target :go :position why})))
+    (when-not (kin/get ctx :throws)
+      (throw (ex-info
+              (str "kin: a call to `" callee "` -- which is `^:throws` -- sits"
+                   " in a function that is not. Rust refuses this at compile"
+                   " time, because `?` needs a `Result` to return into; Go"
+                   " would drop the error instead. Mark the calling function"
+                   " `^:throws` too, or handle the failure where it happens.")
+              {:callee callee :target :go})))
+    (let [i (swap! counter inc)
+          tv (str "t" i)
+          ev (str "e" i)
+          zero (kin/get ctx :go-zero)
+          ind (kin/indent-of ctx)
+          fail (str ind "if " ev " != nil {\n"
+                    ind "\treturn " (when zero (str zero ", ")) ev "\n"
+                    ind "}\n")]
+      (if ret
+        (do (kin/before! ctx ind tv ", " ev " := " call "\n" fail)
+            tv)
+        ;; NO VALUE TO NAME, so the temporary is the error alone and the
+        ;; expression this stands in for is empty -- which is right, because a
+        ;; call to a fallible function with no result is only ever a statement.
+        (do (kin/before! ctx ind ev " := " call "\n" fail)
+            "")))))
+
 (defn- go-defn
   "`(defn ^I32 gcd [^I32 a ^I32 b] ...)` -- Go puts the type after the name.
 
@@ -1679,12 +1749,13 @@
         (declared-call
          {:ret ret :home (home-unit ctx)}
          (fn [c qualified args]
-           (let [as (mapv strip-parens args)]
-             (if method?
-               (str (first as) "." (target-name c nm)
-                    "(" (str/join ", " (rest as)) ")")
-               (str (qualified (target-name c nm))
-                    "(" (str/join ", " as) ")"))))))
+           (let [as (mapv strip-parens args)
+                 call (if method?
+                        (str (first as) "." (target-name c nm)
+                             "(" (str/join ", " (rest as)) ")")
+                        (str (qualified (target-name c nm))
+                             "(" (str/join ", " as) ")"))]
+             (if-not throws? call (go-propagate c nm ret call))))))
        (kin/emit!
         ctx (kin/indent-of ctx)
         "func " (go-recv ctx recv default) (target-name ctx nm) "("
@@ -1818,11 +1889,16 @@
       :else (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
 
 (defn- go-while
-  "Go spells every loop `for`, and `for c {` is the whole of a while."
+  "Go spells every loop `for`, and `for c {` is the whole of a while.
+
+  THE TEST IS RENDERED UNDER `:go-no-hoist`. A loop test runs every
+  iteration, so a fallible call in one cannot be hoisted above the loop --
+  it would run once and the loop would spin on a stale answer."
   [ctx form]
-  (let [[_ test & body] form]
-    (kin/emit! ctx (kin/indent-of ctx)
-               "for " (strip-parens (kin/render ctx test)) " {\n")
+  (let [[_ test & body] form
+        c (kin/scoped ctx {:key :go-no-hoist :value "a loop test"}
+                      (fn [inner] (strip-parens (kin/render inner test))))]
+    (kin/emit! ctx (kin/indent-of ctx) "for " c " {\n")
     (kin/scoped ctx {:key :in-loop :value true :indent 1}
                 (fn [inner] (doseq [f body] (kin/statement! inner f))))
     (kin/emit! ctx (kin/indent-of ctx) "}\n")))
@@ -1943,6 +2019,26 @@
                    (ty-of ctx default tag) "\n"))
       (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
 
+(defn- go-shortcircuit
+  "`and` and `or`, whose later operands are CONDITIONAL.
+
+  Go's `&&` and `||` short-circuit exactly as the other three targets' do, so
+  the spelling needs no arm -- but a hoist out of the second operand would
+  make it run unconditionally, which is a change in meaning rather than in
+  layout. So the first operand renders normally and the rest render under
+  `:go-no-hoist`."
+  [sym]
+  (fn [ctx form]
+    (let [args (rest form)
+          rendered (into [(kin/render ctx (first args))]
+                         (map (fn [f]
+                                (kin/scoped
+                                 ctx {:key :go-no-hoist
+                                      :value (str "a later operand of `" sym "`")}
+                                 (fn [inner] (kin/render inner f)))))
+                         (rest args))]
+      (kin/emit! ctx (str "(" (str/join (str " " (get ops sym) " ") rendered) ")")))))
+
 (defn go-forms
   "The Go arms. `:default-tag` means what it means above.
 
@@ -1993,7 +2089,11 @@
    ;; EVERY OPERATOR IS SPELLED THE SAME IN GO -- `+ - * < > == ! >= <= != &&
    ;; || & | ^ / %` -- and `op-form` never looks at the target, so these are
    ;; the base map's functions rather than copies of them.
-   (reduce (fn [m s] (assoc m s (op-form s))) {} (keys ops))))
+   (reduce (fn [m s] (assoc m s (op-form s))) {} (keys ops))
+   ;; AND THEN THE TWO THAT ARE NOT ORDINARY. `&&` and `||` are spelled the
+   ;; same in Go, but their later operands only sometimes run, so a hoist out
+   ;; of one is a change in meaning. These shadow the entries just merged.
+   {'and (go-shortcircuit 'and) 'or (go-shortcircuit 'or)}))
 
 
 (defn forms

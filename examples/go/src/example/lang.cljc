@@ -55,8 +55,8 @@
           ;; without it cannot be the return of a fallible function in Go,
           ;; which makes it incomplete rather than merely unannotated.
           :zero {:go "0"}})
-(def Bool {:name 'Bool :types {:go "bool" :java "boolean"}})
-(def Str {:name 'Str :types {:go "string" :java "String"}})
+(def Bool {:name 'Bool :types {:go "bool" :java "boolean"} :zero {:go "false"}})
+(def Str {:name 'Str :types {:go "string" :java "String"} :zero {:go "\"\""}})
 
 (defn- t [ctx] (:target ctx))
 (defn- ty [ctx tag] (get-in (kin/tag ctx tag) [:types (t ctx)]))
