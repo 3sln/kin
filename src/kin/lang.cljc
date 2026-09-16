@@ -969,11 +969,25 @@
 
   IT SPLITS ON `_` AND ONLY ON `_`, so the name it is handed has to be
   `SCREAMING_SNAKE` already. `check-const-name!` is what makes that true
-  rather than hoped for."
+  rather than hoped for.
+
+  GO IS LIKE C#, AND FOR A STATED REASON. Effective Go says a constant is
+  `MixedCaps`, never `SCREAMING_SNAKE`, and `golint` says the same -- so
+  `HASH_TRUE` emitted verbatim is a name no Go programmer would write, which
+  is the not-worse rule. Go also spells VISIBILITY in the name, so `^:pub`
+  decides the first letter: `HashTrue` is exported, `hashTrue` is not."
   [target nm]
-  (if (= :csharp target)
+  (cond
+    (= :csharp target)
     (str/join (mapv str/capitalize (str/split (str nm) #"_")))
-    (str nm)))
+
+    (= :go target)
+    (let [pascal (str/join (mapv str/capitalize (str/split (str nm) #"_")))]
+      (if (:pub (meta nm))
+        pascal
+        (str (str/lower-case (subs pascal 0 1)) (subs pascal 1))))
+
+    :else (str nm)))
 
 (defn- check-const-name!
   "Refuse a `defconst` name that is not `SCREAMING_SNAKE`, naming it.
@@ -1013,7 +1027,7 @@
   "How each target spells this constant. Pure, so `:declare` and `:generate`
   answer the same thing without one of them having to run first."
   [nm]
-  (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :java :csharp]))
+  (reduce (fn [m tg] (assoc m tg (const-name tg nm))) {} [:rust :go :java :csharp]))
 
 (defn- const-reference
   "What a reference to this constant becomes, wherever it is written.
@@ -1796,13 +1810,32 @@
                   (fn [inner] (doseq [f body] (kin/statement! inner f))))
       (kin/emit! ctx (kin/indent-of ctx) "}\n"))))
 
+(defn- go-defconst
+  "`const Name Type = value`, with the type written out.
+
+  Go would also accept `const Name = value`, which makes an UNTYPED constant
+  -- more flexible, and not what the source said. A `defconst` carries a tag
+  and the other three targets all emit it, so dropping it here would make Go
+  the one target where `^I32` on a constant meant nothing."
+  [ctx form]
+  (let [[_ nm v] form
+        pub? (:pub (meta nm))
+        _ (check-const-name! ctx nm)
+        cn (const-name (t ctx) nm)
+        tag (kin/tag ctx (:tag (meta nm)))
+        _ (kin/define-tag! ctx {:scope :private} nm tag)
+        ty (get-in tag [:types (t ctx)])
+        lit (if (seq? v) (kin/render ctx v) (str v))]
+    (kin/emit! ctx (kin/indent-of ctx) "const " cn " " ty " = " lit "\n")
+    (kin/define-name!
+     ctx {:scope (if pub? :public :private)} nm (const-reference ctx nm))))
+
 (defn go-forms
   "The Go arms. `:default-tag` means what it means above.
 
   A form absent here has no Go arm YET, and the group reports that by name
   rather than failing inside a render -- which is the reason this is a
-  separate map. `defstruct`, `defconst` and `defdata` are the ones still
-  missing."
+  separate map. `defstruct` and `defdata` are the ones still missing."
   [{:keys [default-tag compound]}]
   (merge
    {'defn (go-defn default-tag)
@@ -1819,6 +1852,10 @@
     ;; Go's comment too, and `do` only re-emits its body.
     'case go-case
     'for (go-for default-tag)
+    ;; `:declare` is the base map's -- registering a name is not a
+    ;; per-language act, and `const-reference` already answers for four
+    ;; targets now that `const-spellings` asks about all of them.
+    'defconst {:declare (:declare defconst-form) :generate go-defconst}
     'comment comment-form
     'doc doc-form
     'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))

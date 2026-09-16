@@ -3,6 +3,8 @@
 package example;
 
 public final class Loops {
+    public static final int STEP_LIMIT = 5;
+
     public static int sumTo(int n) {
         int acc = 0;
         for (int i = 0; i < n; i++) {
@@ -20,5 +22,9 @@ public final class Loops {
             default:
                 return 300;
         }
+    }
+
+    public static int sumLimit() {
+        return sumTo(STEP_LIMIT);
     }
 }

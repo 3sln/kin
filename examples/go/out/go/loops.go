@@ -2,6 +2,8 @@
 
 package loops
 
+const StepLimit int = 5
+
 func SumTo(n int) int {
 	acc := 0
 	for i := 0; i < n; i++ {
@@ -19,4 +21,8 @@ func Classify(x int) int {
 	default:
 		return 300
 	}
+}
+
+func SumLimit() int {
+	return SumTo(StepLimit)
 }

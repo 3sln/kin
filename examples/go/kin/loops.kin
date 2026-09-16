@@ -18,16 +18,29 @@
 ;; compares strings.
 (ns example.loops
   (:require [example.lang :refer [I32]]
-            [kin.lang :refer [defn return let set for case +]]))
+            [kin.lang :refer [defn return let set for case defconst +]]))
 
-(defn ^I32 sum-to [^I32 n]
+;; A constant, which each language spells its own way: Rust and Java scream
+;; it, C# and GO pascalise it -- Effective Go says `MixedCaps`, never
+;; `SCREAMING_SNAKE`, and `^:pub` decides the first letter because Go spells
+;; visibility in the name.
+(defconst ^:pub ^I32 STEP_LIMIT 5)
+
+(defn ^:pub ^I32 sum-to [^I32 n]
   (let [^I32 acc 0]
     (for [^I32 i 0 n]
       (set acc (+ acc i)))
     (return acc)))
 
-(defn ^I32 classify [^I32 x]
+(defn ^:pub ^I32 classify [^I32 x]
   (case x
     [0] 100
     [1 2] 200
     :else 300))
+
+;; AND A REFERENCE to it, which is the half a declaration test misses. A
+;; constant belongs to the module that declares it, so `spell-name` answers
+;; per target -- and until `const-spellings` was asked about `:go` it had no
+;; answer there and would have emitted nothing at all.
+(defn ^:pub ^I32 sum-limit []
+  (return (sum-to STEP_LIMIT)))

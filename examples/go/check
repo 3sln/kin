@@ -55,7 +55,7 @@ import (
 
 func main() {
 	fmt.Println(gcd.Gcd(12, 18), gcd.GcdLabel(42, 63),
-		loops.SumTo(5), loops.Classify(2))
+		loops.SumLimit(), loops.Classify(2))
 }
 MAIN
 go_out=$(cd "$work/go" && go run . 2>&1)
@@ -69,7 +69,7 @@ cat > "$work/java/Main.java" <<'MAIN'
 public class Main {
     public static void main(String[] args) {
         System.out.println(example.Gcd.gcd(12, 18) + " " + example.Gcd.gcdLabel(42, 63)
-                           + " " + example.Loops.sumTo(5) + " " + example.Loops.classify(2));
+                           + " " + example.Loops.sumLimit() + " " + example.Loops.classify(2));
     }
 }
 MAIN
