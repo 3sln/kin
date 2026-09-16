@@ -699,6 +699,54 @@
   (is "7. the head-matching derivation emits NO import -- the bug, reproduced"
       false (str/includes? (:java out) "import static")))
 
+
+;; ---------------------------------------------------------------------------
+;; 8. A TABLE TOO LARGE TO BE A JAVA LITERAL.
+;;
+;; A Java array initializer is CODE -- a store instruction per element, in the
+;; static initializer, under a 65535-byte-per-method ceiling. Past roughly
+;; eight thousand elements `javac` answers `error: code too large`, which no
+;; amount of reading the generated source explains. Rust lays the same literal
+;; out as data and does not care, so this is a Java spelling and not a change
+;; of layout.
+;;
+;; nome found it with the 2231 named HTML character references, whose names
+;; are 16641 bytes end to end.
+
+(def big-src
+  (str "(ns s.big (:require [demo :refer [defn defdata return I32 Rt Cmp]]))
+        (defdata big
+          :data [" (str/join " " (range 5000)) "]
+          :emitter kin.lang/flat-array
+          :accessors {^I32 big-n  [^Rt rt]
+                      ^Cmp big-at [^Rt rt ^I32 i]})
+        (defn ^:method ^Cmp probe [^Rt rt ^I32 i] (return (big-at rt i)))"))
+
+(def big-out (kp/generate prj big-src "big.kin"))
+
+(is "8. rust still writes one literal -- it has no such limit" true
+    (str/includes? (:rust big-out) "pub(crate) static BIG: [u32; 5000] = ["))
+(is "8. java allocates instead of initializing" true
+    (str/includes? (:java big-out) "public static final int[] BIG = new int[5000];"))
+(is "8. and fills it from a static block, in chunks" true
+    (str/includes? (:java big-out) "static {\n        fillBIG0();\n        fillBIG1();"))
+(is "8. each chunk is its own method, so each has its own 64K" true
+    (str/includes? (:java big-out) "private static void fillBIG1() {\n        int[] a = BIG;"))
+(is "8. the last element is there -- chunking loses nothing" true
+    (str/includes? (:java big-out) "a[4999] = 4999;"))
+(is "8. the accessor is unchanged: it reads the binding either way" true
+    (str/includes? (:java big-out) "return BIG[i];"))
+
+;; AND THE THRESHOLD IS A THRESHOLD: a table that fits stays a literal, so
+;; every table already generated reads exactly as it did.
+(let [small (kp/generate
+             prj
+             (str/replace big-src (str/join " " (range 5000))
+                          (str/join " " (range 100)))
+             "small.kin")]
+  (is "8. a table under the limit is still one literal" true
+      (str/includes? (:java small) "public static final int[] BIG = {")))
+
 (println)
 (if (zero? @failures)
   (println "defdata: the table is data, the emitter is named, the signature is kin's\n")

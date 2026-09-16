@@ -1616,6 +1616,54 @@
            (when trailing-comma? ",")
            "\n" ind close)))))
 
+(def ^:private java-literal-limit
+  "How many elements Java will take as one array literal.
+
+  A JAVA ARRAY INITIALIZER IS CODE, not data: `{1, 2, 3}` compiles to a store
+  instruction per element, inside the static initializer, and a method's code
+  may not exceed 65535 bytes. At roughly eight bytes an element that is a hard
+  ceiling somewhere near eight thousand, and the failure is `error: code too
+  large` -- a compiler error that no amount of reading the generated source
+  explains.
+
+  The other three targets have no such limit: Rust and Go lay an array literal
+  out as data, and C# hands a primitive array off to a metadata blob.
+
+  Two thousand leaves the margin wide, because the cost per element is not
+  fixed -- a wider index or a larger value spends more -- and being wrong here
+  is a build that does not compile rather than one that runs slowly."
+  2048)
+
+(defn- java-filler
+  "The static initializer for a table too large to be one literal.
+
+  `new int[n]` for the field, and the values assigned in chunks by a method
+  each, called from a `static` block. Java runs static initializers in textual
+  order and these are emitted after the field, so the array exists by the time
+  they run. Assigning INTO a `final` array is not assigning the field, so the
+  field stays `final`."
+  [bound elem n per-line xs]
+  (let [parts (vec (partition-all java-literal-limit (map-indexed vector xs)))
+        nm (fn [i] (str "fill" bound i))]
+    (concat
+     ["static {"]
+     (map-indexed (fn [i _] (str "    " (nm i) "();")) parts)
+     ["}"]
+     (mapcat
+      (fn [i part]
+        (concat
+         [(str "private static void " (nm i) "() {")
+          (str "    " elem "[] a = " bound ";")]
+         ;; Eight to a line rather than `per-line`: an assignment is four
+         ;; times as wide as the number in it, so the same count would be a
+         ;; four-hundred-column line.
+         (map (fn [row]
+                (str "    " (str/join " " (map (fn [[k x]] (str "a[" k "] = " x ";"))
+                                               row))))
+              (partition-all 8 part))
+         ["}"]))
+      (range) parts))))
+
 (defn flat-array
   "The emitter for the common case: a flat sequence of numbers, with COUNT
   and INDEX accessors.
@@ -1657,7 +1705,11 @@
                                  " no accessor, so nothing says what its"
                                  " elements are.")
                             {:binding bound})))
-        per-line (or stride 16)
+        ;; ONE RECORD PER LINE, and where a record is a single number that
+        ;; rule says nothing -- a stride-1 table laid out one number to a line
+        ;; is sixteen thousand lines of no information. So stride wraps the
+        ;; line only when a record is actually wider than a number.
+        per-line (if (and stride (> stride 1)) stride 16)
         n (count xs)
         idx (fn [target]
               ;; The index expression, in the argument slots `{1}` and `{2}`
@@ -1694,8 +1746,12 @@
      (case (t ctx)
        :rust {:type (str "[" elem "; " n "]")
               :expr (array-literal ctx "[" "]" per-line xs)}
-       :java {:type (str elem "[]")
-              :expr (array-literal ctx "{" "}" per-line xs)}
+       :java (if (> n java-literal-limit)
+               {:type (str elem "[]")
+                :expr (str "new " elem "[" n "]")
+                :helpers (java-filler bound elem n per-line xs)}
+               {:type (str elem "[]")
+                :expr (array-literal ctx "{" "}" per-line xs)})
        :csharp {:type (str elem "[]")
                 :expr (array-literal ctx (str "new " elem "[] {") "}" per-line xs)}
        ;; `[N]T` rather than `[]T`, mirroring Rust: the length is known and
