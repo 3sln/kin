@@ -157,9 +157,22 @@
 
 (is "report: every source and every vocabulary, with what each can speak"
     [["broken.kin" "everywhere.kin" "narrow.kin" "nowhere.kin" "only.kin"]
-     {'narrow {:targets #{:rust} :forms 1 :tags 1 :names 0}
-      'wide {:targets #{:rust :java} :forms 39 :tags 2 :names 0}}]
+     ;; A VECTOR PER NAMESPACE, because a namespace is a GROUP: several maps
+     ;; may share a `:namespace` and a reference walks them for the one that
+     ;; speaks its target. One map each here, so one entry each -- and the
+     ;; vector is the shape either way, so a reader does not have to know
+     ;; which case they are looking at.
+     {'narrow [{:targets #{:rust} :forms 1 :tags 1 :names 0}]
+      'wide [{:targets #{:rust :java} :forms 39 :tags 2 :names 0}]}]
     [(:sources r) (into {} (:vocabularies r))])
+
+;; AND WITH ONE MAP EACH, NOTHING IS SPLIT. `:split` names the symbols whose
+;; answering map differs by target, which is the situation grouping makes
+;; possible and which this project does not have. Empty here is the
+;; backward-compatibility claim, stated as an assertion rather than assumed:
+;; every existing project has one map per namespace and sees no change.
+(is "report: no symbol resolves differently per target"
+    {} (:split (get (:origins r) "everywhere.kin")))
 
 ;; ONE LIST, ACROSS KINDS. The two bugs this file is about are found by two
 ;; different mechanisms -- one is a symbol attributed to nothing, the other an

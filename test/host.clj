@@ -372,8 +372,15 @@
          [rust-nth "// @kin:link:name:TY-STR: {:kind :const :as \"TyStr\"}"]))
 
 (is "12b. a name annotated by both trees lands in `:names`, per target"
-    {:java "TY_STR" :rust "TyStr"}
-    (get-in (host/vocabularies named) ['demo.rt :names 'TY-STR]))
+    ;; ONE MAP PER TARGET, each carrying its own tree's spelling. It used to be
+    ;; one map with a merged `{:java .. :rust ..}` under the name -- the right
+    ;; value and the wrong claim, because the map also said it spoke both
+    ;; while one tree's annotation might have been absent. A map that claims
+    ;; one target and holds one spelling cannot say that.
+    [{:java "TY_STR"} {:rust "TyStr"}]
+    (mapv #(get-in % [:names 'TY-STR])
+          (sort-by (comp str :targets)
+                   (kin/vocab-group (host/vocabularies named) 'demo.rt))))
 
 (is "12b. and a name only one tree declares is reported like any other"
     [{:issue :missing :sym 'TY-STR :declared #{:java} :missing #{:rust}}]
@@ -400,18 +407,26 @@
                :targets {:rust kin.target/rust :java kin.target/java}
                :target-order [:rust :java]}))
 
-(def scanned (get (:vocabularies prj) 'demo.rt))
+(def scanned-group
+  (sort-by (comp str :targets) (kin/vocab-group (:vocabularies prj) 'demo.rt)))
 
-(is "12. what comes out is an ordinary vocabulary, named and speaking two"
-    ['demo.rt #{:java :rust}] [(:namespace scanned) (:targets scanned)])
+(is "12. what comes out is an ordinary vocabulary GROUP, one map per target"
+    [['demo.rt #{:java}] ['demo.rt #{:rust}]]
+    (mapv (juxt :namespace :targets) scanned-group))
+
+;; AND THE NAMESPACE STILL SPEAKS BOTH, which is what a source requiring it
+;; needs: the union over the group is what `target-report` intersects.
+(is "12. and the namespace speaks the union of its maps"
+    #{:java :rust} (kin/group-targets (:vocabularies prj) 'demo.rt))
 
 ;; A tag is assembled from the type each host file declared, and the per-target
 ;; halves make the one shape `check-vocabulary` already demands of a
 ;; hand-written vocabulary. That this project exists at all is that check
 ;; passing.
-(is "12. a tag is assembled from the type each target answered"
-    {:name 'Value :types {:java "long" :rust "u64"}}
-    (get-in scanned [:tags 'Value]))
+(is "12. a tag carries the type the target that declared it answered"
+    [{:name 'Value :types {:java "long"}}
+     {:name 'Value :types {:rust "u64"}}]
+    (mapv #(get-in % [:tags 'Value]) scanned-group))
 
 (def kin-source
   "(ns t (:require [shape :refer [defn return Value]]
@@ -427,23 +442,94 @@
 ;; The other half of "it is an ordinary vocabulary": a target no host file
 ;; annotated is refused by name, at the call, exactly as a kin namespace's
 ;; exports are.
-(is "12. a target no host file annotated is refused, naming what was"
-    (str "kin.host: demo.rt/vec-nth is annotated for java rust and not for"
-         " :csharp -- no host file declares it there.")
-    (threw #((get-in scanned [:forms 'vec-nth]) {:target :csharp} '(vec-nth v i))))
+
+;; A HALF-EXTENDED NAMESPACE, which is the failure grouping newly makes
+;; possible and the one error the two deleted dispatchers were for.
+;;
+;; `demo.rt` is extended to C# by a hand-written map that declares ONE symbol.
+;; The namespace therefore speaks C#, so a source requiring it generates for
+;; C# -- and `vec-nth`, which only the two host trees declare, has no map that
+;; both speaks C# and holds it. That is a real mistake somebody will make the
+;; first time they extend a namespace, and it has to say which symbol and
+;; which target rather than `not in scope`, which would be false.
+;;
+;; ONE ERROR, IN ONE PLACE. `kin.host` used to wrap every `:forms` entry in a
+;; function that read `(:target ctx)` and threw its own `annotated for java
+;; rust and not for :csharp`; `kin.project` had a second one, worded
+;; differently, for a kin namespace's exports. Both were
+;; one-map-per-namespace workarounds and both are gone.
+(is "12. a symbol the extension did not cover is refused, naming both"
+    (str "kin: demo.rt/vec-nth is declared for java rust and not for :csharp."
+         " 3 maps declare demo.rt and none of the ones holding `vec-nth`"
+         " speaks :csharp.")
+    (threw
+     #(let [three-way
+            (kp/project
+             {:vocabularies [{:namespace 'shape :targets #{:java :rust :csharp}
+                              :names {}
+                              :tags {'Value {:name 'Value
+                                             :types {:java "long" :rust "u64"
+                                                     :csharp "ulong"}}}
+                              :forms (core/forms
+                                      {:default-tag
+                                       {:name 'Value
+                                        :types {:java "long" :rust "u64"
+                                                :csharp "ulong"}}})}
+                             ;; The extension, covering one symbol and not
+                             ;; `vec-nth`.
+                             {:namespace 'demo.rt :targets #{:csharp}
+                              :tags {} :names {}
+                              :forms {'cs-only (fn [_ _] nil)}}]
+              :host agreed
+              :targets {:rust kin.target/rust :java kin.target/java
+                        :csharp kin.target/csharp}
+              :target-order [:rust :java :csharp]})]
+        (kp/generate three-way kin-source "t.kin"))))
 
 ;; And a namespace stated TWICE -- once by the host tree and once by hand -- is
 ;; the drift the annotations exist to remove, held in one project value.
-(is "12. a namespace declared by both a host tree and by hand is refused"
-    (str "kin: demo.rt is declared both by a host tree's annotations and by a"
-         " hand-written vocabulary. Only one of them can be the statement of"
-         " what the host exposes, and the annotations exist because the"
-         " hand-written one drifted.")
-    (threw #(kp/project {:vocabularies [shape {:namespace 'demo.rt
-                                               :targets #{:java :rust}
-                                               :tags {} :names {} :forms {}}]
+(is "12. a namespace declared by both a host tree and by hand COEXISTS"
+    ;; THE REFUSAL NARROWED, deliberately. It used to refuse this outright,
+    ;; naming the namespace, because the annotations exist BECAUSE the
+    ;; hand-written table drifted. Grouping makes coexistence expressible and
+    ;; the blanket refusal would block the case grouping is FOR: a host tree
+    ;; declaring a namespace for two targets and a hand-written map extending
+    ;; it to a third is composition, not drift.
+    ;;
+    ;; So what is refused is the drift itself -- one symbol declared for one
+    ;; target by two maps -- and nothing else. Here the hand-written map adds
+    ;; `:csharp` and declares nothing the trees do, so the group is three
+    ;; maps and the namespace speaks three languages.
+    [3 #{:csharp :java :rust}]
+    (let [p (kp/project {:vocabularies [shape {:namespace 'demo.rt
+                                               :targets #{:csharp}
+                                               :tags {} :names {}
+                                               :forms {'cs-only (fn [_ _] nil)}}]
                          :host agreed
-                         :targets {:rust kin.target/rust :java kin.target/java}})))
+                         :targets {:rust kin.target/rust :java kin.target/java
+                                   :csharp kin.target/csharp}})]
+      [(count (kin/vocab-group (:vocabularies p) 'demo.rt))
+       (kin/group-targets (:vocabularies p) 'demo.rt)]))
+
+;; AND THE DRIFT IS STILL REFUSED, naming the symbol and the target rather
+;; than just the namespace. This is the same hand-written map as above with
+;; one word changed -- it claims `:java`, which a host tree already answers
+;; `vec-nth` for -- and that one word is the difference between extending a
+;; namespace and restating it.
+(is "12. the same symbol for the same target, by two maps, is refused"
+    (str "kin: 1 symbol in demo.rt forms is declared for one target by two"
+         " maps of it -- `vec-nth` for :java is the first. Several maps may"
+         " share a `:namespace`, which is how a namespace is extended to a"
+         " new language, but two of them answering for the same target is two"
+         " statements of one fact and the order they were listed in would"
+         " silently pick one.")
+    (threw #(kp/project {:vocabularies [shape {:namespace 'demo.rt
+                                               :targets #{:java}
+                                               :tags {} :names {}
+                                               :forms {'vec-nth (fn [_ _] nil)}}]
+                         :host agreed
+                         :targets {:rust kin.target/rust
+                                   :java kin.target/java}})))
 
 ;; ------------------------------------------------------------------- 11
 

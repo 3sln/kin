@@ -247,9 +247,15 @@
                 :target-order [:rust :java]
                 :sources {:vfs (vfs/memory-vfs sources) :match "*.kin"}})))
 
+(defn- across
+  "One registry's keys across a namespace's GROUP. A kin namespace's exports
+  are one map per target now, so the names it offers are the union."
+  [prj nsym kind]
+  (vec (sort (distinct (mapcat (comp keys kind)
+                               (kin/vocab-group (:vocabularies prj) nsym))))))
+
 (is "3. `^:pub` accessors leave the namespace as ordinary forms"
-    '[case-upper-at case-upper-n]
-    (vec (sort (keys (:forms (get-in linked [:vocabularies 's.a]))))))
+    '[case-upper-at case-upper-n] (across linked 's.a :forms))
 
 (let [out (kp/generate linked (get sources "b.kin") "b.kin")]
   ;; QUALIFIED, by the shipped `:emit`. The accessor's template expands to
@@ -393,14 +399,13 @@
 
 (is "3. a NAME-ONLY module speaks the targets it GENERATED for"
     #{:rust :java}
-    (:targets (get-in tables [:vocabularies 's.t])))
+    (kin/group-targets (:vocabularies tables) 's.t))
 (is "3. it really does export only names -- no form supplies them"
     [[] '[CASE_UPPER_LEN]]
-    [(vec (keys (:forms (get-in tables [:vocabularies 's.t]))))
-     (vec (sort (keys (:names (get-in tables [:vocabularies 's.t])))))])
+    [(across tables 's.t :forms) (across tables 's.t :names)])
 (is "3. and a module with no `defn` but a `^:pub` table speaks them too"
     #{:rust :java}
-    (:targets (get-in tables [:vocabularies 's.v])))
+    (kin/group-targets (:vocabularies tables) 's.v))
 
 ;; THE SHAPE THAT FAILED: a source requiring the table-only modules. It threw
 ;; `generates for NO target` before emitting a byte, because the intersection

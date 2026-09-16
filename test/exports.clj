@@ -107,11 +107,31 @@
 (println "\nexports: requiring a kin namespace is enough\n")
 
 ;; 1 and 2. What crossed the boundary, and what did not.
+(defn- exported-forms
+  "Every form name a kin namespace exports, across its group.
+
+  A NAMESPACE IS A GROUP and a kin namespace's exports are ONE MAP PER
+  TARGET, which is what deleted the call-time dispatcher: every `:forms`
+  entry used to be a function that read `(:target ctx)` and picked from a
+  `{target impl}` map, and now the target's own map holds the target's own
+  implementation and `kin/group-entry` picks."
+  [nsym]
+  (vec (sort (distinct (mapcat (comp keys :forms)
+                               (kin/vocab-group (:vocabularies prj) nsym))))))
+
 (is "1. `^:pub` definitions are exported"
-    '[nine quad triple]
-    (vec (sort (keys (:forms (get-in prj [:vocabularies 's.b]))))))
+    '[nine quad triple] (exported-forms 's.b))
 (is "2. an unmarked definition is NOT exported -- `hidden` is absent"
-    '[twice] (vec (sort (keys (:forms (get-in prj [:vocabularies 's.a]))))))
+    '[twice] (exported-forms 's.a))
+
+;; ONE MAP PER TARGET, and each claims exactly the target it holds. That is
+;; the shape the dispatcher used to hide inside a closure, and it is checkable
+;; now: `check-vocabulary` guarantees a tag has a type for every target ITS
+;; map claims, and a map claiming one target cannot lie about the other.
+(is "1. and there is one map per target it generated for"
+    [#{:java} #{:rust}]
+    (mapv :targets (sort-by (comp str :targets)
+                            (kin/vocab-group (:vocabularies prj) 's.b))))
 
 ;; 3 and 4. The cycle generates, and the call carries the target's shape.
 (let [out (kp/generate prj (get sources "b.kin") "b.kin")]
