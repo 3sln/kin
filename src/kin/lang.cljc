@@ -189,7 +189,36 @@
   [ctx nm]
   ((get-in ctx [:targets (:target ctx) :fn-name] (fn [_ s] (str s))) ctx nm))
 
-(defn- ty-of [ctx default tag] (get-in (or (kin/tag ctx tag) default) [:types (t ctx)]))
+(defn type-of
+  "An already-resolved tag, spelled for this target -- AND the one place a type
+  becomes text, which is why it is also where a type says what it needs.
+
+  `need!` is otherwise call-driven: a FORM asks for what it needs while
+  rendering. A type asks for nothing, because nothing renders it but `defn`,
+  `let` and the handful of others below -- so a tag whose spelling requires an
+  import had no way to say so, and Go's `*strings.Builder` in a parameter list
+  came out with `undefined: strings` and the import nowhere in sight.
+
+  A tag may now carry `:needs` beside `:types`:
+
+      {:name 'Sink
+       :types {:go \"*strings.Builder\" :java \"StringBuilder\"}
+       :needs {:go \"strings\"}}
+
+  and every site that spells the type asks for it. Java, C# and Rust name
+  nothing here because a `StringBuilder` needs no import and `String` is in
+  Rust's prelude -- which is the shape of the whole thing: one target needs a
+  word, so the TAG states the fact and each target spends what it must.
+
+  A string, or a collection of them for a type that needs several."
+  [ctx tag]
+  (when-let [need (get-in tag [:needs (t ctx)])]
+    (if (string? need)
+      (need! ctx need)
+      (doseq [n need] (need! ctx n))))
+  (get-in tag [:types (t ctx)]))
+
+(defn- ty-of [ctx default tag] (type-of ctx (or (kin/tag ctx tag) default)))
 
 ;; --- ALIASING INTENT -------------------------------------------------------
 ;;
@@ -280,7 +309,7 @@
                              "-- unmarked, one spelling would mean the callee's "
                              "writes are visible on some targets and not others")
                         {:tag tag :symbol p}))
-        (get-in tg [:types (t ctx)]))
+        (type-of ctx tg))
       (or (get-in tg [a (t ctx)])
           (throw (ex-info (str "kin: `" tag "` has no " a " rendering for "
                                (name (t ctx)) ", so `" p "` cannot be marked ^"
@@ -668,7 +697,7 @@
               ;; said something and inference must not argue with it.
               declared (kin/tag ctx (:tag (meta nm)))
               tag (or declared produced)
-              ty (get-in (or tag default) [:types (t ctx)])
+              ty (type-of ctx (or tag default))
               _ (kin/define-tag! ctx {:scope :private} nm tag)]
           (kin/emit! ctx (kin/indent-of ctx)
                            ;; `^:mut` on a LOCAL, for the same reason it is on
@@ -698,7 +727,7 @@
   (fn [ctx form]
     (let [nm (second form)
           tag (kin/tag ctx (:tag (meta nm)))
-          ty (get-in (or tag default) [:types (t ctx)])
+          ty (type-of ctx (or tag default))
           _ (kin/define-tag! ctx {:scope :private} nm tag)
           n (kin/local-name ctx nm)]
       (kin/emit! ctx (kin/indent-of ctx)
@@ -960,7 +989,7 @@
     (let [[_ binding & body] form
           [nm start end] binding
           tag (kin/tag ctx (:tag (meta nm)))
-          ty (get-in (or tag default) [:types (t ctx)])
+          ty (type-of ctx (or tag default))
           _ (kin/define-tag! ctx {:scope :private} nm tag)
           n (kin/local-name ctx nm)
           a (strip-parens (kin/render ctx start))
@@ -1164,7 +1193,7 @@
         cn (const-name (t ctx) nm)
         tag (kin/tag ctx (:tag (meta nm)))
         _ (kin/define-tag! ctx {:scope :private} nm tag)
-        ty (get-in tag [:types (t ctx)])
+        ty (type-of ctx tag)
         ;; The SOURCE says whether a constant is written in hex, by wrapping
         ;; it in `(hex ...)` or not. Deriving it from the value produced
         ;; `HASH_TRUE = 0x4cf`, which is the right number and the wrong
@@ -1967,7 +1996,7 @@
           (kin/define-tag! ctx {:scope :private} nm tag)
           (kin/emit! ctx (kin/indent-of ctx)
                      (if declared
-                       (str "var " n " " (get-in (or tag default) [:types :go])
+                       (str "var " n " " (type-of ctx (or tag default))
                             " = " code "\n")
                        (str n " := " code "\n")))))
       (doseq [f body] (kin/statement! ctx f)))))
@@ -1979,7 +2008,7 @@
       (kin/define-tag! ctx {:scope :private} nm tag)
       (kin/emit! ctx (kin/indent-of ctx)
                  "var " (kin/local-name ctx nm) " "
-                 (get-in (or tag default) [:types :go]) "\n"))))
+                 (type-of ctx (or tag default)) "\n"))))
 
 (defn- go-return
   "`return v`, or `return v, nil` from a function that can fail.
@@ -2127,7 +2156,7 @@
         cn (const-name (t ctx) nm)
         tag (kin/tag ctx (:tag (meta nm)))
         _ (kin/define-tag! ctx {:scope :private} nm tag)
-        ty (get-in tag [:types (t ctx)])
+        ty (type-of ctx tag)
         lit (if (seq? v) (kin/render ctx v) (str v))]
     (kin/emit! ctx (kin/indent-of ctx) "const " cn " " ty " = " lit "\n")
     (kin/define-name!
