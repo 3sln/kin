@@ -33,9 +33,11 @@
 ;;      `{:type :int :name a}` and not `^:int a`
 ;;   8. THE PAYLOAD IS OPAQUE. kin carries a value it cannot read to the
 ;;      target's `:link`, with the vfs and the path, and uses only the answer
-;;   9. the answer is checked against the MARKER, and an arity is a count
+;;   9. the answer is checked against the MARKER, an arity is a count, and a
+;;      `:throws` is a boolean
 ;;  10. two targets' ANSWERS are compared: a form one declares and the other
-;;      does not, and two that state different arities. Two annotations for
+;;      does not, two that state different arities, and two that disagree
+;;      about whether the function can FAIL. Two annotations for
 ;;      one symbol in one target are refused, naming both
 ;;  11. the agreed arity meets the CALL SITES, which is the half of the drift
 ;;      no cross-target comparison can reach
@@ -249,6 +251,20 @@
          " and nothing is checked against it.")
     (answering {:link-fn identity :arity "two"}))
 
+(is "9. a `:throws` that is not a boolean is refused: kin owns that key too"
+    (str "kin.host: a.src:2: the spy target's `:link` answered a `:throws` of"
+         " :maybe for `odd`. Whether a host function can fail is a yes or a"
+         " no -- a target that will not state one omits the key or answers"
+         " nil, and nothing is checked against it.")
+    (answering {:link-fn identity :throws :maybe}))
+
+(is "9. and `false` is an answer, not an omission"
+    :kin/no-throw
+    (threw #(host/interpret
+             {:spy {:key :spy :link (fn [_ _ _] {:link-fn identity :throws false})}}
+             [(scan-of :spy "//" {"a.src" (str "// @kin:link:ns: demo.rt\n"
+                                               "// @kin:link:form:odd: 1\n")})])))
+
 (is "9. and a tag's answer has to carry this target's `:type`"
     (str "kin.host: a.src:2: `T` is annotated as a TAG, and the spy target's"
          " `:link` answered no `:type` for it. A tag's answer carries this"
@@ -271,6 +287,10 @@
              :type {:type (:as data)}
              :const {:spelling (:as data)}
              :method {:arity (count (:args data))
+                      ;; ONLY WHEN THE PAYLOAD SAYS SO, which is the point of
+                      ;; the key: a target that does not mention failure has
+                      ;; declined to answer, and `nil` is not `false`.
+                      :throws (when (contains? data :throws) (:throws data))
                       :link-fn (fn [ctx form]
                                  (kin/emit! ctx (str (:class data) "." (:name data) "("
                                                      (str/join ", " (map #(kin/render ctx %) (rest form)))
@@ -283,6 +303,7 @@
              :type {:type (:as data)}
              :const {:spelling (:as data)}
              :method {:arity (:takes data)
+                      :throws (when (contains? data :throws) (:throws data))
                       :link-fn (fn [ctx form]
                                  (kin/emit! ctx (str "self." (:fn data) "("
                                                      (str/join ", " (map #(kin/render ctx %) (rest form)))
@@ -327,6 +348,31 @@
       (threw #(host/check-agreement
                (scans [java-nth]
                       ["// @kin:link:form:vec-nth: {:kind :method :fn \"vec_nth\" :takes 3}"])))))
+
+;; 10c. THE `:throws` HALF. A port made fallible in two languages and not in
+;; the other two still compiles everywhere and means something different in
+;; half of it -- there is no generated call that fails to build, because each
+;; target's code is internally consistent. Nothing but this comparison can see
+;; it.
+(let [ds (host/disagreements
+          (scans ["// @kin:link:form:vec-nth: {:kind :method :class \"Vecs\" :name \"nth\" :args [{} {}] :throws true}"]
+                 ["// @kin:link:form:vec-nth: {:kind :method :fn \"vec_nth\" :takes 2 :throws false}"]))]
+  (is "10. two answers disagreeing about failure are reported, with both"
+      [{:issue :throws :sym 'vec-nth :throws {:java true :rust false}}]
+      (mapv #(select-keys % [:issue :sym :throws]) ds))
+  (is "10. and the gate says which way each target went"
+      (str "kin.host: 1 disagreement between the targets' annotations.\n"
+           "  demo.rt/vec-nth disagrees about whether it can fail: java true, rust false\n"
+           "      declared at java Vecs.java:2, rust vecs.rs:2")
+      (threw #(host/check-agreement
+               (scans ["// @kin:link:form:vec-nth: {:kind :method :class \"Vecs\" :name \"nth\" :args [{} {}] :throws true}"]
+                      ["// @kin:link:form:vec-nth: {:kind :method :fn \"vec_nth\" :takes 2 :throws false}"])))))
+
+(is "10. a target that says nothing about failure does not disagree"
+    []
+    (host/disagreements
+     (scans ["// @kin:link:form:vec-nth: {:kind :method :class \"Vecs\" :name \"nth\" :args [{} {}] :throws true}"]
+            [rust-nth])))
 
 (is "10. a target that states no arity does not disagree with one that does"
     []

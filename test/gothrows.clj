@@ -37,6 +37,13 @@
 ;;   7. a hoisting loop test moves into the loop
 ;;   8. calling a fallible function from one that is not is refused
 ;;   9. nothing changes where nothing hoists
+;;  10. A HOST-LINKED FORM MAY SAY IT CAN FAIL. `^:throws` on a kin `defn`
+;;      reaches every call site through the emitter `defn` registers; a form
+;;      backed by a HOST function registers a TEMPLATE, and a template
+;;      describes a spelling and cannot describe a return convention. So
+;;      `port.ResourceGet(url)` came out assigned to one variable while the Go
+;;      function it named returned two. `(call tmpls {:throws true})` is where
+;;      the fact rides now -- beside the template rather than in it.
 (require '[kin] '[kin.lang :as core] '[kin.target] '[kin.project :as kp]
          '[clojure.string :as str])
 
@@ -67,27 +74,41 @@
 
 ;; A tag WITH a zero and one WITHOUT, because item 4 is about the difference.
 (def I32  {:name 'I32  :types {:go "int"} :zero {:go "0"}})
-(def Bare {:name 'Bare :types {:go "int"}})
+(def Bare {:name 'Bare :types {:go "int" :rust "i32"}})
+
+(def I32both {:name 'I32 :types {:go "int" :rust "i32"} :zero {:go "0"}})
 
 (def subject
-  {:namespace 'subj :targets #{:go}
-   :tags {'I32 I32 'Bare Bare} :names {}
-   :literal-tag (fn [v] (when (integer? v) I32))
-   :forms {}})
+  {:namespace 'subj :targets #{:go :rust}
+   :tags {'I32 I32both 'Bare Bare} :names {}
+   :literal-tag (fn [v] (when (integer? v) I32both))
+   ;; A HOST-LINKED FORM THAT CAN FAIL, declared the way a target's `:link`
+   ;; declares one: a template per target, and `:throws` beside it.
+   :forms {'resource-get (core/call {:go "port.ResourceGet({0})"
+                                     :rust "crate::port::resource_get({0})"}
+                                    {:tag I32both :throws true})
+           ;; And one that cannot, so the test can say what DOES NOT change.
+           'clock (core/call {:go "port.Clock()" :rust "crate::port::clock()"}
+                             {:tag I32both})}})
 
 (def targets
   {:go {:key :go :ext "go" :indent-unit "\t"
         :local-name (fn [_ s] (str s))
-        :fn-name (fn [_ s] (str/join (map str/capitalize (str/split (str s) #"-"))))}})
+        :fn-name (fn [_ s] (str/join (map str/capitalize (str/split (str s) #"-"))))}
+   ;; A SECOND TARGET, for test 10 alone. `^:throws` is one decision with two
+   ;; spellings -- Go hoists and checks, Rust appends `?` -- and a test that
+   ;; saw only one of them would pass while the other did nothing.
+   :rust kin.target/rust})
 
 (def project
   (delay (kp/project {:vocabularies (into [subject] (kp/load-vocabulary 'kin.lang))
-                      :targets targets :target-order [:go]})))
+                      :targets targets :target-order [:go :rust]})))
 
 (defn go [src] (:go (kp/generate @project src "t.kin")))
+(defn rust [src] (:rust (kp/generate @project src "t.kin")))
 
 (def head
-  "(ns t (:require [subj :refer [I32 Bare]]
+  "(ns t (:require [subj :refer [I32 Bare resource-get clock]]
                    [kin.lang :refer [defn return if let while and or < + >]]))\n")
 
 ;; 1, 2 -- the signature and the success slot
@@ -151,6 +172,28 @@
 (let [out (go (str head "(defn ^I32 g [^I32 a] (while (> a 0) (return a)) (return 0))"))]
   (has "9. a loop test that hoists nothing keeps its shape" "for a > 0 {" out)
   (is  "9. and does not become unconditional" false (str/includes? out "for {")))
+
+;; 10 -- a HOST-LINKED form that can fail
+(let [src (str head "(defn ^:throws ^I32 g [^I32 a] (return (+ (resource-get a) 1)))")]
+  (let [out (go src)]
+    (has "10. Go hoists a host call that can fail"  "t1, e1 := port.ResourceGet(a)" out)
+    (has "10. and checks its error"                 "if e1 != nil {" out)
+    (has "10. propagating the enclosing zero"       "return 0, e1" out)
+    (has "10. the expression sees the temporary"    "return t1 + 1, nil" out))
+  (has "10. Rust appends `?` to the same call"
+       "crate::port::resource_get(a)? + 1" (rust src)))
+
+;; and one that cannot fail is untouched, which is the half that says the
+;; mechanism is off by default rather than on for every template.
+(let [src (str head "(defn ^I32 g [^I32 a] (return (+ (clock) 1)))")]
+  (has "10. a host form that cannot fail still reads as an expression"
+       "return port.Clock() + 1" (go src))
+  (is  "10. and takes no temporary" false (str/includes? (go src) "e1 != nil")))
+
+;; a fallible HOST call from a function that is not fallible is refused, for
+;; the same reason a kin one is: Go would drop the error on the floor.
+(refuses "10. a fallible host call from a function that is not"
+         #(go (str head "(defn ^I32 g [^I32 a] (return (resource-get a)))")))
 
 (println (format "\ngothrows: %s\n"
                  (if (zero? @failures) "ok" (str @failures " failure(s)"))))

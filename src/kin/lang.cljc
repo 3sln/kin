@@ -102,12 +102,42 @@
                   (fn [i c] (if (delimited? tmpl i) (strip-parens c) c))
                   texts))))
 
+(declare go-propagate)
+
+(defn- propagated
+  "What a call to something FALLIBLE looks like, per target.
+
+  Rust appends `?`. Go hoists the call into a temporary and checks the error
+  beside it, which is a statement and not a spelling -- so this is a call into
+  `go-propagate` and not a string, and in STATEMENT position it answers `nil`,
+  because by then the hoist has already written the whole statement and there
+  is nothing left for the caller to emit. Java and C# unwind, so there is
+  nothing to say.
+
+  THE SAME THREE ANSWERS `defn` ALREADY GIVES. A kin function marked
+  `^:throws` reaches these through `declared-call`; this is the other door
+  into them, for a form whose implementation is a host function."
+  [ctx callee tag code]
+  (case (t ctx)
+    :rust (str code "?")
+    :go (let [v (go-propagate ctx callee tag code)]
+          (when-not (= :statement (kin/position ctx)) v))
+    code))
+
 (defn call
   "A form that is a call: render the arguments, fill the target's template, and
   emit as a statement or an expression depending on where it sits.
 
   `(call tmpls {:tag T})` says what the call PRODUCES, which is how a tag
   reaches an enclosing form. `T` may be a tag or a `(fn [ctx form] -> tag)`.
+
+  `(call tmpls {:throws true})` says the thing behind the template CAN FAIL,
+  and is the other half of `^:throws`. A kin `defn` says it on the name and
+  `declared-call` carries it to every call site; a form backed by a HOST
+  function had nowhere to say it, so `port.ResourceGet(url)` came out assigned
+  to one variable while the Go function it named returned two. A template
+  describes a spelling and cannot describe a return convention, so the fact
+  rides beside the template rather than in it.
 
   A target with no template is REFUSED by name. It used to fill `nil`, which
   `fmt` turned into an empty string, so a vocabulary that claimed to speak a
@@ -116,7 +146,7 @@
   Tags and names are checked when the vocabulary loads; a form is a function
   and cannot be, so it is checked here, the first time it is asked."
   ([tmpls] (call tmpls nil))
-  ([tmpls {:keys [tag]}]
+  ([tmpls {:keys [tag throws]}]
    (fn [ctx form]
     (let [tmpl (or (get tmpls (t ctx))
                    (throw (ex-info
@@ -125,14 +155,19 @@
                                 (pr-str (vec (sort-by str (keys tmpls)))))
                            {:form (first form) :target (t ctx)
                             :speaks (vec (keys tmpls))})))
-          code (fill tmpl (mapv (fn [f] (kin/render ctx f)) (rest form)))]
-      ;; WHAT THIS CALL PRODUCED. `:tag` may be a value or a function of the
-      ;; context, which is the form deciding about its own product -- kin
-      ;; carries the answer and does not read it.
-      (kin/tagged! ctx (if (fn? tag) (tag ctx form) tag))
-      (if (= :statement (kin/position ctx))
+          code (fill tmpl (mapv (fn [f] (kin/render ctx f)) (rest form)))
+          ;; WHAT THIS CALL PRODUCED. `:tag` may be a value or a function of
+          ;; the context, which is the form deciding about its own product --
+          ;; kin carries the answer and does not read it.
+          produced (if (fn? tag) (tag ctx form) tag)
+          _ (kin/tagged! ctx produced)
+          code (if throws (propagated ctx (first form) produced code) code)]
+      (cond
+        ;; `nil` means the propagation already wrote the whole statement.
+        (nil? code) nil
+        (= :statement (kin/position ctx))
         (kin/emit! ctx (kin/indent-of ctx) code ";\n")
-        (kin/emit! ctx code))))))
+        :else (kin/emit! ctx code))))))
 
 ;; THERE IS NO `bit-shift-right` HERE, and its absence is the point.
 ;;

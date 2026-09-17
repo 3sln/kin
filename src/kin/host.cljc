@@ -59,6 +59,7 @@
       (fn [link-data vfs file-path]
         -> {:link-fn <a form link function, the kind kin already installs>
             :arity   <how many arguments a CALL takes>
+            :throws  <can the host function FAIL?>
             ...whatever else that target can usefully report})
 
   It is handed the vfs and the path as well as the data, because the file is
@@ -68,9 +69,15 @@
   That RETURNED METADATA -- never the payload -- is what the checks are built
   from. `disagreements` compares the targets' answers against each other;
   `arities` is what a usage check in `kin.project` compares a call site
-  against. So the two things kin can say about a host declaration -- every
-  target declares it, and they agree about how many arguments it takes -- are
-  said in kin's own vocabulary, about data kin defined the meaning of.
+  against. So the three things kin can say about a host declaration -- every
+  target declares it, they agree about how many arguments it takes, and they
+  agree about whether it can fail -- are said in kin's own vocabulary, about
+  data kin defined the meaning of.
+
+  `:throws` is the newest of the three and is the one a hand-written table
+  could never have carried, because it is not a SPELLING. A host function that
+  can fail needs its call hoisted and its error checked in Rust and Go, and a
+  template describes neither -- so the fact has to arrive as an answer.
 
   NOTHING IS EVALUATED. The payload is data and the target is ordinary
   project code, already loaded, already a function. There is no interpreter
@@ -337,8 +344,11 @@
   kin checks the shape of the answer and nothing about the data that produced
   it. A form has to come back with a `:link-fn`, because that is the slot a
   vocabulary has for it; a tag with a `:type`, because that is the slot a tag
-  has. An `:arity` is optional and, when given, is a count -- kin defined that
-  key and so may say what may be in it.
+  has. An `:arity` is optional and, when given, is a count; a `:throws` is
+  optional and, when given, is a boolean -- kin defined both keys and so may
+  say what may be in them. For both, `nil` is NOT STATED rather than a value:
+  a target writing `(when (contains? data :throws) ...)` answers nil when its
+  own payload says nothing, and that is declining to answer.
 
   A target learns which of the two it is being asked about from ITS OWN
   payload, not from kin: the signature is `(data vfs path)` and the data is
@@ -388,6 +398,22 @@
                  " will not state one omits the key, and nothing is checked"
                  " against it.")
             {:target target :symbol sym :arity a})))
+  ;; `:throws` IS A BOOLEAN AND NOT MERELY TRUTHY. A target answering
+  ;; `:throws :maybe` has said something kin has no meaning for, and reading
+  ;; it as true would leave the disagreement check comparing `:maybe` against
+  ;; `true` and reporting two targets that agree.
+  ;; `nil` IS NOT STATED, which is how `:arity` already reads and is what a
+  ;; target writing `(when (contains? data :throws) ...)` produces. A key
+  ;; present with no value is not an answer.
+  (when (some? (:throws answer))
+    (when-not (boolean? (:throws answer))
+      (fail path line
+            (str "the " (name target) " target's `:link` answered a `:throws`"
+                 " of " (pr-str (:throws answer)) " for `" sym "`. Whether a"
+                 " host function can fail is a yes or a no -- a target that"
+                 " will not state one omits the key or answers nil, and"
+                 " nothing is checked against it.")
+            {:target target :symbol sym :throws (:throws answer)})))
   answer)
 
 (defn interpret
@@ -467,6 +493,12 @@
                 invisible until a kin source calls it.
     `:arity`    two targets whose answers both state an arity, and state
                 different ones.
+    `:throws`   two targets whose answers both say whether the function can
+                fail, and say different things. Less about drift between host
+                trees than about a port made fallible in two languages and
+                not in the other two -- where the generated code still
+                compiles everywhere and means something different in half of
+                it.
 
   THE ARITY HALF IS NOT VACUOUS, and the first attempt at this namespace made
   it so. That version counted the binding vector of the payload, which was a
@@ -505,6 +537,18 @@
               (when (< 1 (count (set (vals stated))))
                 [{:issue :arity :ns nsym :kind kind :sym sym
                   :arities stated
+                  :sites (into (sorted-map) (map (fn [t] [t (where t)])) (keys stated))}]))
+            ;; The same rule for `:throws`: only between answers that both
+            ;; state it, because omitting the key is declining to say and is
+            ;; not saying no.
+            (let [stated (into (sorted-map)
+                               (keep (fn [[t e]]
+                                       (when-some [v (:throws (:link e))]
+                                         [t v])))
+                               by-target)]
+              (when (< 1 (count (set (vals stated))))
+                [{:issue :throws :ns nsym :kind kind :sym sym
+                  :throws stated
                   :sites (into (sorted-map) (map (fn [t] [t (where t)])) (keys stated))}])))))
        (by-key scans))))))
 
@@ -520,7 +564,10 @@
                     "\n      declared at " sites)
       :arity (str (:ns d) "/" (:sym d) " states different arities: "
                   (str/join ", " (for [[t a] (:arities d)] (str (name t) " " a)))
-                  "\n      declared at " sites))))
+                  "\n      declared at " sites)
+      :throws (str (:ns d) "/" (:sym d) " disagrees about whether it can fail: "
+                   (str/join ", " (for [[t a] (:throws d)] (str (name t) " " a)))
+                   "\n      declared at " sites))))
 
 (defn check-agreement
   "Answer `scans` if every target declares the same linkage; throw saying what
