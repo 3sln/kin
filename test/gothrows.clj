@@ -10,13 +10,20 @@
 ;; temporary, and what the enclosing expression sees is the temporary's name.
 ;;
 ;; That hoist is correct in an ordinary expression and WRONG in two places,
-;; both of which were verified to emit silently wrong code before the checks
-;; below existed:
+;; both of which were verified to emit silently wrong code:
 ;;
 ;;   * a short-circuit operand -- `(and (> a 0) (f a))` hoisted `f` above the
 ;;     `if`, so an operand `&&` would have skipped ran unconditionally;
 ;;   * a loop test -- `(while (f a) ...)` hoisted it above the loop, so the
 ;;     test ran ONCE and `for t1 {` span forever on a stale answer.
+;;
+;; Both were REFUSED by name for a while, which was honest and not an answer.
+;; Neither is refused now: the form that makes a position conditional hands
+;; the sub-expression a private anchor and puts what lands in it where the
+;; operand actually runs. A short-circuit becomes a conditional assignment to
+;; a boolean temporary; a loop test moves inside an unconditional loop and
+;; breaks. Both shapes are pinned below, and so is the case where nothing
+;; hoists -- because the whole point is that ordinary code is unchanged.
 ;;
 ;; What is pinned:
 ;;
@@ -26,9 +33,10 @@
 ;;   4. the zero comes from the TAG and is refused by name when absent
 ;;   5. a zero is asked of functions that can FAIL, not of every function with
 ;;      a return type
-;;   6. hoisting out of a short-circuit operand is refused
-;;   7. hoisting out of a loop test is refused
+;;   6. a hoisting short-circuit operand becomes a guarded assignment
+;;   7. a hoisting loop test moves into the loop
 ;;   8. calling a fallible function from one that is not is refused
+;;   9. nothing changes where nothing hoists
 (require '[kin] '[kin.lang :as core] '[kin.target] '[kin.project :as kp]
          '[clojure.string :as str])
 
@@ -55,7 +63,7 @@
           (println (format "  FAIL %s -- it did NOT refuse" label)))
       (println (format "  ok   %-44s %s" label (subs msg 0 (min 42 (count msg))))))))
 
-(println "\ngothrows: `^:throws` reaches Go, and refuses where a hoist would lie\n")
+(println "\ngothrows: `^:throws` reaches Go, and moves what a hoist would break\n")
 
 ;; A tag WITH a zero and one WITHOUT, because item 4 is about the difference.
 (def I32  {:name 'I32  :types {:go "int"} :zero {:go "0"}})
@@ -80,7 +88,7 @@
 
 (def head
   "(ns t (:require [subj :refer [I32 Bare]]
-                   [kin.lang :refer [defn return if let while and < + >]]))\n")
+                   [kin.lang :refer [defn return if let while and or < + >]]))\n")
 
 ;; 1, 2 -- the signature and the success slot
 (let [out (go (str head "(defn ^:throws ^I32 f [^I32 n] (return n))"))]
@@ -107,19 +115,42 @@
      "func F(n int) int"
      (go (str head "(defn ^Bare f [^Bare n] (return n))")))
 
-;; 6, 7, 8 -- the three refusals
-(refuses "6. a hoist out of a short-circuit operand"
-         #(go (str head
+;; 6 -- a short-circuit operand that hoists
+(let [out (go (str head
                    "(defn ^:throws ^I32 f [^I32 n] (return n))\n"
-                   "(defn ^:throws ^I32 g [^I32 a] (if (and (> a 0) (f a)) (return 1)) (return 0))")))
-(refuses "7. a hoist out of a loop test"
-         #(go (str head
+                   "(defn ^:throws ^I32 g [^I32 a] (if (and (> a 0) (f a)) (return 1)) (return 0))"))]
+  (has "6. the value becomes a boolean temporary" "b1 := (a > 0)" out)
+  (has "6. the later operand runs under a guard"  "if b1 {\n\t\tt1, e1 := F(a)" out)
+  (has "6. and assigns the temporary"             "b1 = t1" out)
+  (has "6. which is what the expression sees"     "if b1 {\n\t\treturn 1, nil" out))
+
+(let [out (go (str head
                    "(defn ^:throws ^I32 f [^I32 n] (return n))\n"
-                   "(defn ^:throws ^I32 g [^I32 a] (while (f a) (return a)) (return 0))")))
+                   "(defn ^:throws ^I32 g [^I32 a] (if (or (> a 0) (f a)) (return 1)) (return 0))"))]
+  (has "6. `or` is the same statement with the sense flipped" "if !b1 {" out))
+
+;; 7 -- a loop test that hoists
+(let [out (go (str head
+                   "(defn ^:throws ^I32 f [^I32 n] (return n))\n"
+                   "(defn ^:throws ^I32 g [^I32 a] (while (f a) (return a)) (return 0))"))]
+  (has "7. the loop becomes unconditional"   "for {" out)
+  (has "7. the test moves inside it"         "for {\n\t\tt1, e1 := F(a)" out)
+  (has "7. and a false test breaks"          "if !(t1) {\n\t\t\tbreak" out))
+
+;; 8 -- the one refusal that is still a refusal
 (refuses "8. a fallible call from a function that is not"
          #(go (str head
                    "(defn ^:throws ^I32 f [^I32 n] (return n))\n"
                    "(defn ^I32 g [^I32 a] (return (f a)))")))
+
+;; 9 -- and none of this touches code that does not hoist
+(let [out (go (str head "(defn ^I32 g [^I32 a] (if (and (> a 0) (< a 9)) (return 1)) (return 0))"))]
+  (has "9. a short-circuit that hoists nothing is one expression"
+       "if (a > 0) && (a < 9) {" out)
+  (is  "9. and takes no temporary" false (str/includes? out "b1")))
+(let [out (go (str head "(defn ^I32 g [^I32 a] (while (> a 0) (return a)) (return 0))"))]
+  (has "9. a loop test that hoists nothing keeps its shape" "for a > 0 {" out)
+  (is  "9. and does not become unconditional" false (str/includes? out "for {")))
 
 (println (format "\ngothrows: %s\n"
                  (if (zero? @failures) "ok" (str @failures " failure(s)"))))

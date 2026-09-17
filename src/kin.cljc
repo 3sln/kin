@@ -196,6 +196,18 @@
                       i))
                   items)))
 
+(defn anchor-text
+  "What has been emitted against `a` so far, as one string.
+
+  An anchor is normally write-only: something drops it, something else emits
+  into it, and the join resolves it. This READS one, which one caller needs --
+  the Go arm hands a sub-expression a private anchor precisely so it can ask
+  afterwards whether anything hoisted, and then decide where the hoisted
+  statements belong. `\"\"` is the answer for an anchor nothing wrote to, and
+  that answer is the question being asked."
+  [a]
+  (resolve-sink (deref (:sink (:kin/node a)))))
+
 ;; ------------------------------------------------------- context protocols
 ;;
 ;; A FORM HAS TWO CONCERNS: how to USE the thing it produces, and how to

@@ -1894,23 +1894,19 @@
   is the worse of the two failures and the one worth spending an error on."
   [ctx callee ret call]
   (let [counter (kin/get ctx :go-temps)]
-    ;; WHERE A HOIST WOULD CHANGE WHAT RUNS, REFUSE. `before!` puts the call
-    ;; above the statement being built, which is right in an ordinary
-    ;; expression and wrong in two places -- a short-circuit operand, which
-    ;; would then run unconditionally, and a loop test, which would then run
-    ;; once. Both were verified to produce silently wrong code before this
-    ;; check existed. Refusing is not the final answer for either (see nome's
-    ;; ROADMAP P0.2f/g) but it is the honest one: a named error beats output
-    ;; that compiles and means something else.
-    (when-let [why (kin/get ctx :go-no-hoist)]
-      (throw (ex-info
-              (str "kin: `" callee "` is `^:throws`, so calling it in Go"
-                   " hoists the call and its error check above the statement"
-                   " -- and this call is in " why ", where that changes what"
-                   " runs. Rust's `?` has no such problem because it is an"
-                   " expression operator. Bind the result to a `let` first,"
-                   " where the hoist is what you meant.")
-              {:callee callee :target :go :position why})))
+    ;; WHERE A HOIST WOULD CHANGE WHAT RUNS, SOMETHING ELSE MOVES. `before!`
+    ;; puts the call above the statement being built, which is right in an
+    ;; ordinary expression and wrong in two places -- a short-circuit operand,
+    ;; which would then run unconditionally, and a loop test, which would then
+    ;; run once. Both were verified to emit silently wrong code, and both were
+    ;; REFUSED here for a while.
+    ;;
+    ;; Neither is refused now, and nothing changed at this end: `go-while` and
+    ;; `go-shortcircuit` hand the sub-expression a PRIVATE anchor and put what
+    ;; lands in it where the operand actually runs. That is the right end for
+    ;; it -- the form that makes a position conditional is the form that knows
+    ;; where its condition belongs, and a call has no business knowing it is
+    ;; in one.
     (when-not (kin/get ctx :throws)
       (throw (ex-info
               (str "kin: a call to `" callee "` -- which is `^:throws` -- sits"
@@ -2006,6 +2002,12 @@
                ;; temporaries it hoists are named deterministically. Both are
                ;; facts about the ENCLOSING function, which is why they are
                ;; scoped here and not computed at the call.
+               ;;
+               ;; TWO COUNTERS, NOT ONE. A hoisted call takes `t<n>`/`e<n>`
+               ;; and a short-circuit with a hoisting operand takes `b<n>`,
+               ;; and they are numbered apart because the second is allocated
+               ;; AFTER its operands render -- one counter would print `b2`
+               ;; beside the only `t1` in the function, which reads as a bug.
                (kin/scoped
                 ;; ONLY WHEN IT CAN FAIL. Asking for a zero on every function
                 ;; with a return type refuses tags that never needed one --
@@ -2016,7 +2018,10 @@
                 (fn [in3]
                   (kin/scoped
                    in3 {:key :go-temps :value (atom 0)}
-                   (fn [in4] (doseq [f body] (kin/statement! in4 f)))))))))))
+                   (fn [in4]
+                     (kin/scoped
+                      in4 {:key :go-bools :value (atom 0)}
+                      (fn [in5] (doseq [f body] (kin/statement! in5 f)))))))))))))
        (kin/emit! ctx (kin/indent-of ctx) "}\n")))})
 
 (defn- go-let
@@ -2117,17 +2122,45 @@
 (defn- go-while
   "Go spells every loop `for`, and `for c {` is the whole of a while.
 
-  THE TEST IS RENDERED UNDER `:go-no-hoist`. A loop test runs every
-  iteration, so a fallible call in one cannot be hoisted above the loop --
-  it would run once and the loop would spin on a stale answer."
+  A TEST THAT HOISTS MOVES INTO THE LOOP. A loop test runs every iteration,
+  so a fallible call in one cannot sit above the loop -- it would run once
+  and the loop would spin on a stale answer. What Go can say instead is an
+  unconditional loop whose first act is the test:
+
+      for {
+          t1, e1 := Ok(a)
+          if e1 != nil { return 0, e1 }
+          if !(t1) { break }
+          ...
+      }
+
+  and `continue` still re-runs the test, because the test is the top of the
+  body. The test is rendered against a PRIVATE anchor so this can ask
+  afterwards whether anything hoisted at all -- when nothing did, the loop
+  keeps its ordinary shape and the output is unchanged."
   [ctx form]
   (let [[_ test & body] form
-        c (kin/scoped ctx {:key :go-no-hoist :value "a loop test"}
-                      (fn [inner] (strip-parens (kin/render inner test))))]
-    (kin/emit! ctx (kin/indent-of ctx) "for " c " {\n")
-    (kin/scoped ctx {:key :in-loop :value true :indent 1}
-                (fn [inner] (doseq [f body] (kin/statement! inner f))))
-    (kin/emit! ctx (kin/indent-of ctx) "}\n")))
+        a (kin/anchor)
+        ;; One level deeper, because that is where the hoisted statements
+        ;; will land if there are any. An expression carries no indentation
+        ;; of its own, so this costs the other case nothing.
+        c (kin/scoped ctx {:key :kin/stmt-anchor :value a :indent 1}
+                      (fn [inner] (strip-parens (kin/render inner test))))
+        pre (kin/anchor-text a)]
+    (if (str/blank? pre)
+      (do (kin/emit! ctx (kin/indent-of ctx) "for " c " {\n")
+          (kin/scoped ctx {:key :in-loop :value true :indent 1}
+                      (fn [inner] (doseq [f body] (kin/statement! inner f))))
+          (kin/emit! ctx (kin/indent-of ctx) "}\n"))
+      (do (kin/emit! ctx (kin/indent-of ctx) "for {\n")
+          (kin/scoped ctx {:key :in-loop :value true :indent 1}
+                      (fn [inner]
+                        (kin/emit! inner pre)
+                        (kin/emit! inner (kin/indent-of inner) "if !(" c ") {\n")
+                        (kin/emit! inner (kin/indent-of inner) "\tbreak\n")
+                        (kin/emit! inner (kin/indent-of inner) "}\n")
+                        (doseq [f body] (kin/statement! inner f))))
+          (kin/emit! ctx (kin/indent-of ctx) "}\n")))))
 
 (defn- go-forever [ctx form]
   (kin/emit! ctx (kin/indent-of ctx) "for {\n")
@@ -2249,21 +2282,74 @@
   "`and` and `or`, whose later operands are CONDITIONAL.
 
   Go's `&&` and `||` short-circuit exactly as the other three targets' do, so
-  the spelling needs no arm -- but a hoist out of the second operand would
-  make it run unconditionally, which is a change in meaning rather than in
-  layout. So the first operand renders normally and the rest render under
-  `:go-no-hoist`."
+  the spelling needs no arm as long as nothing hoists. A hoist out of a later
+  operand is the problem: `before!` puts it above the whole statement, where
+  it runs whether or not the operand would have.
+
+  SO A HOISTING OPERAND BECOMES A CONDITIONAL ASSIGNMENT. The value of the
+  expression is a boolean temporary, and every operand after the first that
+  hoists gets an `if` of its own, guarded by that temporary --
+
+      b1 := a > 0
+      if b1 {
+          t2, e2 := Ok(a)
+          if e2 != nil { return 0, e2 }
+          b1 = t2
+      }
+
+  -- so the operand runs exactly when `&&` would have run it. `or` guards on
+  `!b1` instead, which is the same statement with the sense flipped.
+
+  THE FIRST OPERAND ALWAYS RUNS, so it hoists normally and needs none of
+  this; and a RUN of later operands that hoist nothing is joined with the
+  operator as before, since `&&` short-circuits them by itself. When no later
+  operand hoists there is one such run and the output is exactly what it was."
   [sym]
   (fn [ctx form]
     (let [args (rest form)
-          rendered (into [(kin/render ctx (first args))]
-                         (map (fn [f]
-                                (kin/scoped
-                                 ctx {:key :go-no-hoist
-                                      :value (str "a later operand of `" sym "`")}
-                                 (fn [inner] (kin/render inner f)))))
-                         (rest args))]
-      (kin/emit! ctx (str "(" (str/join (str " " (get ops sym) " ") rendered) ")")))))
+          op (str " " (get ops sym) " ")
+          first-text (kin/render ctx (first args))
+          ;; Each later operand against a private anchor, so this can ask
+          ;; afterwards which of them hoisted. One level deeper, because that
+          ;; is where a hoist will land.
+          later (mapv (fn [f]
+                        (let [a (kin/anchor)
+                              text (kin/scoped
+                                    ctx {:key :kin/stmt-anchor :value a :indent 1}
+                                    (fn [inner] (kin/render inner f)))]
+                          {:text text :pre (kin/anchor-text a)}))
+                      (rest args))]
+      (if (every? (comp str/blank? :pre) later)
+        (kin/emit! ctx (str "(" (str/join op (into [first-text] (map :text) later)) ")"))
+        (let [counter (kin/get ctx :go-bools)
+              _ (when-not counter
+                  (throw (ex-info
+                          (str "kin: a `" sym "` in Go has an operand that hoists,"
+                               " which needs a temporary -- and there is no"
+                               " temporary counter here, so this is not inside a"
+                               " function body.")
+                          {:form form :target :go})))
+              b (str "b" (swap! counter inc))
+              ind (kin/indent-of ctx)
+              guard (if (= 'or sym) (str "!" b) b)
+              ;; Consecutive operands that hoist nothing ride along with the
+              ;; one before them, joined by the operator -- `&&` already
+              ;; short-circuits those.
+              chunks (reduce (fn [acc {:keys [text pre]}]
+                               (if (and (str/blank? pre) (seq acc)
+                                        (str/blank? (:pre (peek acc))))
+                                 (conj (pop acc)
+                                       (update (peek acc) :text str op text))
+                                 (conj acc {:text text :pre pre})))
+                             []
+                             later)]
+          (kin/before! ctx ind b " := " first-text "\n")
+          (doseq [{:keys [text pre]} chunks]
+            (kin/before! ctx ind "if " guard " {\n")
+            (when-not (str/blank? pre) (kin/before! ctx pre))
+            (kin/before! ctx ind "\t" b " = " text "\n")
+            (kin/before! ctx ind "}\n"))
+          (kin/emit! ctx b))))))
 
 (defn go-forms
   "The Go arms. `:default-tag` means what it means above.
