@@ -951,23 +951,65 @@
         entries (mapv (fn [l] {:label l :text (source-text prj l)}) labels)]
     {:order labels :emitted (emit-sources! prj entries)}))
 
+(defn destination-report
+  "`{:destinations [...] :unanalysable {label message} :unresolved msg}`.
+
+  EXPORTS ARE RESOLVED FIRST, and not doing that is why this once answered
+  for a third of a project while saying so in no way at all. A source that
+  requires a sibling cannot be analysed against the bare project -- it
+  throws `no vocabulary nome.lu` -- so every source that was not
+  self-contained threw, was swallowed, and simply was not in the answer.
+  Downstream, nome's drift gate compared a list of 61 destinations against a
+  tree of 532 committed files and reported `ok`. `resolve-exports` is the
+  same dependency walk `emit-all!` does, and it is what makes the question
+  answerable at all.
+
+  AND WHAT STILL CANNOT BE ANALYSED IS NAMED. `destinations` is a list of
+  what WILL be written, so a source missing from it contributes nothing and
+  says nothing -- which is the shape of a gate that passes because its input
+  shrank. This does not throw, because `report` promises it will not; it
+  hands the failures back so that a caller which IS a gate can refuse them.
+  `:unresolved` is the same courtesy one level up: resolving the exports
+  means GENERATING every source, which a project with a broken one cannot
+  do, and the answer then falls back to what the bare project can see -- a
+  third of it -- with the reason attached rather than implied."
+  ([prj] (destination-report prj (sources prj)))
+  ([prj srcs]
+   (let [resolved (try {:prj (resolve-exports prj)}
+                       (catch #?(:clj Exception :default :default) e
+                         {:err (or (ex-message e) (str e))}))
+         prj (or (:prj resolved) prj)
+         seen (for [[label text] srcs]
+                [label (try {:ok (analyse prj text label)}
+                            (catch #?(:clj Exception :default :default) e
+                              {:err (or (#?(:clj ex-message :cljs ex-message) e)
+                                        (str e))}))])]
+     {:destinations
+      (vec (sort-by (comp str second)
+                    (distinct
+                     (for [[_ {a :ok}] seen
+                           :when a
+                           t (:emit-for a)
+                           :let [d (destination prj t (:ns-name a))]
+                           :when d]
+                       [t (second d)]))))
+      :unanalysable (into (sorted-map)
+                          (for [[label {e :err}] seen
+                                :when e]
+                            [label e]))
+      :unresolved (:err resolved)})))
+
 (defn destinations
   "Every `[target path]` this project would write, given `sources`.
 
   `sources` is `{label text}`. A gate needs this: a project that commits its
   generated code has to re-emit everything and compare, and the list of what
-  to compare is not knowable any other way once destination is a function."
+  to compare is not knowable any other way once destination is a function.
+
+  A source that cannot be analysed is absent here and named by
+  `destination-report`, which is the call a gate should make."
   ([prj] (destinations prj (sources prj)))
-  ([prj srcs]
-  (vec (sort-by (comp str second)
-                (distinct
-                 (for [[label text] srcs
-                       :let [a (try (analyse prj text label) (catch #?(:clj Exception :default :default) _ nil))]
-                       :when a
-                       t (:emit-for a)
-                       :let [d (destination prj t (:ns-name a))]
-                       :when d]
-                   [t (second d)]))))))
+  ([prj srcs] (:destinations (destination-report prj srcs))))
 
 ;; ----------------------------------------------------------- source-origins
 ;;
