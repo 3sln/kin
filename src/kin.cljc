@@ -1485,6 +1485,22 @@
                               {:symbol v :target (:target ctx)})))
                     (local-name ctx v))
     (nil? v) (or (get ctx :nil) "null")
+    ;; A WHOLE NUMBER PAST WHAT A 32-BIT INT HOLDS IS NOT SPELLED THE SAME
+    ;; EVERYWHERE. Rust infers the type of a literal from its use, Go's
+    ;; untyped constants convert on assignment, and C# picks the first type
+    ;; in its own list that fits -- so all three take the digits as written.
+    ;; JAVA DOES NOT: an integer literal is an `int` unless it carries an
+    ;; `L`, and one that does not fit is a compile error at the digits,
+    ;; `integer number too large`, whatever it was about to be cast to.
+    ;;
+    ;; This surfaced on a scale constant of 65536 squared -- the only honest
+    ;; way to write the fixed-point scale of a reciprocal -- which three
+    ;; targets compiled and the fourth refused. The suffix is Java's alone
+    ;; because it is Java's rule; adding it everywhere would be inventing a
+    ;; spelling for targets that did not ask for one.
+    (and (integer? v) (= :java (:target ctx))
+         (or (> v 2147483647) (< v -2147483648)))
+    (str v "L")
     :else (str v)))
 
 ;; ------------------------------------------------------------- declarations
