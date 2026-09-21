@@ -28,7 +28,13 @@
   {:namespace 'demo :targets #{:rust}
    :tags {'I32 I32 'Rt Rt*} :names {}
    :forms (merge (core/forms {:default-tag I32})
-                 {'thing (core/call {:rust "VOCAB_thing({0})"})})})
+                 ;; BOTH ARGUMENTS, because the local `thing` below takes
+                 ;; both and this fixture is about ONE NAME resolving two
+                 ;; ways. A name that resolves two ways has to take the same
+                 ;; arguments both ways, or the two readings of `(thing rt x)`
+                 ;; are not the same call -- and the arity check in
+                 ;; `kin.lang/call` now says so.
+                 {'thing (core/call {:rust "VOCAB_thing({0}, {1})"})})})
 
 (def prj (kp/project {:vocabularies [vocabulary]
                       :targets {:rust kin.target/rust}
@@ -80,7 +86,7 @@
 ;; And it shows in the OUTPUT, which is the part that matters.
 (let [out (:rust (kp/generate prj positional "t.kin"))]
   (is "4. the call before the definition emits the vocabulary's shape"
-      true (str/includes? out "return VOCAB_thing(self);"))
+      true (str/includes? out "return VOCAB_thing(self, x);"))
   (is "4. and the call after it emits the local one"
       true (str/includes? out "return self.thing(x);")))
 

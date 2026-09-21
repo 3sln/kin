@@ -250,6 +250,65 @@
         true (boolean (and m (str/includes? m "none like it")
                            (< (count m) 200))))))
 
+;; 14. A TEMPLATE IS POSITIONAL, AND BOTH MISCOUNTS ARE SILENT WITHOUT THIS.
+;;
+;; `fmt` substitutes only the indices it was handed. Too FEW arguments and the
+;; unfilled `{N}` is copied through verbatim into the target language -- a
+;; compile error three steps away, blaming generated code nobody wrote. Too
+;; MANY and the extras are simply never referenced, which produces code that
+;; COMPILES and does the wrong thing. The second is the dangerous one and had
+;; nothing looking for it.
+;;
+;; Both are errors here, and the message says WHICH, because the two want
+;; opposite fixes.
+(let [vocab {:namespace 'w :targets #{:rust}
+             :tags {'I32 {:name 'I32 :types {:rust "i32"}}}
+             :names {}
+             :forms (merge (core/forms {})
+                           {'two (core/call {:rust "TWO({0}, {1})"})
+                            ;; NAMES NO ARGUMENT AT ALL, and still takes one:
+                            ;; `:arity` is how a word says so, and without it
+                            ;; the count read off the template would demand
+                            ;; `(none)` where every other word is called with
+                            ;; a receiver.
+                            'none (core/call {:rust "NONE()"} {:arity 1})})}
+      prj (kp/project {:vocabularies [vocab]
+                       :targets {:rust kin.target/rust}
+                       :target-order [:rust]})
+      msg (fn [src] (try (kp/generate prj src "f.kin") nil
+                         (catch Exception e (first (str/split-lines (ex-message e))))))
+      out (fn [src] (try (:rust (kp/generate prj src "f.kin"))
+                         (catch Exception e (str "THREW: " (ex-message e)))))]
+
+  (let [m (msg "(ns s.f (:require [w :refer [defn return I32 two]]))
+                (defn ^I32 f [^I32 x] (return (two x)))")]
+    (is "14. too few arguments is refused, and says so" true
+        (boolean (and m (str/includes? m "takes 2 arguments and was given 1")
+                      (str/includes? m "too few"))))
+    (is "14.  ... and names the template, so the fix is visible" true
+        (boolean (and m (str/includes? m "TWO({0}, {1})")))))
+
+  (let [m (msg "(ns s.f (:require [w :refer [defn return I32 two]]))
+                (defn ^I32 f [^I32 x] (return (two x x x)))")]
+    (is "14. too many arguments is refused -- the case that used to COMPILE"
+        true (boolean (and m (str/includes? m "takes 2 arguments and was given 3")
+                           (str/includes? m "dropped silently")))))
+
+  (is "14. a correct call is untouched" true
+      (str/includes? (out "(ns s.f (:require [w :refer [defn return I32 two]]))
+                           (defn ^I32 f [^I32 x] (return (two x x)))")
+                     "TWO(x, x)"))
+
+  ;; `:arity` says what the template cannot.
+  (is "14. a declared arity is honoured where the template names nothing" true
+      (str/includes? (out "(ns s.f (:require [w :refer [defn return I32 none]]))
+                           (defn ^I32 f [^I32 x] (return (none x)))")
+                     "NONE()"))
+  (let [m (msg "(ns s.f (:require [w :refer [defn return I32 none]]))
+                (defn ^I32 f [^I32 x] (return (none)))")]
+    (is "14.  ... and a declared arity is still CHECKED, not merely recorded"
+        true (boolean (and m (str/includes? m "takes 1 argument and was given 0"))))))
+
 (println)
 (if (zero? @failures)
   (println "diagnostics: the reports say what is true, and say why\n")

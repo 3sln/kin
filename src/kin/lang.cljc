@@ -24,6 +24,20 @@
 (defn fmt [tmpl args]
   (reduce (fn [s i] (str/replace s (str "{" i "}") (nth args i ""))) tmpl (range (count args))))
 
+(defn template-arity
+  "How many arguments `tmpl` consumes: the highest `{N}` it names, plus one.
+
+  ZERO WHEN IT NAMES NONE, which is a real answer and not a missing one --
+  a template may be a constant piece of text.
+
+  A template is allowed to SKIP an index. `crosses_a_heap({1})` names only
+  `{1}` because the receiver every other word takes is of no use to it, and
+  its arity is still 2: what matters is how many arguments must ARRIVE for
+  the highest one to be filled, not how many are read."
+  [tmpl]
+  (let [idx (map #(Integer/parseInt (second %)) (re-seq #"\{(\d)\}" tmpl))]
+    (if (seq idx) (inc (apply max idx)) 0)))
+
 (defn strip-parens
   "Drop the outer parentheses of a whole expression.
 
@@ -131,6 +145,11 @@
   `(call tmpls {:tag T})` says what the call PRODUCES, which is how a tag
   reaches an enclosing form. `T` may be a tag or a `(fn [ctx form] -> tag)`.
 
+  `(call tmpls {:arity n})` says how many arguments the form takes, for a
+  template whose text does not SPELL them all -- a word that is a constant
+  string but is still called receiver-first. Without it the count is read off
+  the template, which is right for every word that names its arguments.
+
   `(call tmpls {:throws true})` says the thing behind the template CAN FAIL,
   and is the other half of `^:throws`. A kin `defn` says it on the name and
   `declared-call` carries it to every call site; a form backed by a HOST
@@ -146,7 +165,7 @@
   Tags and names are checked when the vocabulary loads; a form is a function
   and cannot be, so it is checked here, the first time it is asked."
   ([tmpls] (call tmpls nil))
-  ([tmpls {:keys [tag throws]}]
+  ([tmpls {:keys [tag throws arity]}]
    (fn [ctx form]
     (let [tmpl (or (get tmpls (t ctx))
                    (throw (ex-info
@@ -155,6 +174,35 @@
                                 (pr-str (vec (sort-by str (keys tmpls)))))
                            {:form (first form) :target (t ctx)
                             :speaks (vec (keys tmpls))})))
+          ;; HOW MANY ARGUMENTS THIS TAKES, asserted rather than assumed.
+          ;;
+          ;; A template is POSITIONAL and `fmt` substitutes only the indices it
+          ;; was given, so both mistakes are silent in opposite ways. Too FEW
+          ;; and the unfilled `{N}` is copied through verbatim into the target
+          ;; language -- a compile error three steps away, blaming generated
+          ;; code nobody wrote. Too MANY and the extras are never referenced:
+          ;; that one produces CODE THAT COMPILES and does the wrong thing,
+          ;; which is the worse of the two and had nothing looking for it.
+          ;;
+          ;; `:arity` overrides the count for a template that takes an
+          ;; argument it does not SPELL -- a word whose text is a constant but
+          ;; which is still called receiver-first, so that the vocabulary has
+          ;; no exceptions to the calling convention. Without it such a word
+          ;; would be required to be called with no receiver, which is a trap
+          ;; rather than a saving.
+          want (or arity (template-arity tmpl))
+          got (count (rest form))
+          _ (when (not= want got)
+              (throw (ex-info
+                      (str "kin: `" (first form) "` takes " want
+                           " argument" (when (not= 1 want) "s") " and was given "
+                           got ". Its " (name (t ctx)) " template is "
+                           (pr-str tmpl)
+                           (if (< got want)
+                             " -- too few leaves an unfilled `{N}` in the generated code."
+                             " -- too many are dropped silently, and the code still compiles."))
+                      {:form (first form) :target (t ctx)
+                       :template tmpl :wanted want :given got})))
           code (fill tmpl (mapv (fn [f] (kin/render ctx f)) (rest form)))
           ;; WHAT THIS CALL PRODUCED. `:tag` may be a value or a function of
           ;; the context, which is the form deciding about its own product --
