@@ -1007,6 +1007,22 @@
   (if-body ctx form))
 
 (defn- if-body [ctx form]
+  ;; TOO MANY ARMS IS THE SILENT MISTAKE, and it is the same argument `call`
+  ;; makes about a template's arity one page up: a fourth form is never
+  ;; referenced, so the code COMPILES and does something else. What it costs is
+  ;; an afternoon -- `(if c (comment "why") (comment "and why") (let ...))`
+  ;; renders the two comments as the two arms and drops the work, in a function
+  ;; that still passes its gate because the answer it returns is the fallback.
+  ;;
+  ;; TOO FEW is the loud one and is refused here anyway, because an `if` with no
+  ;; consequent is a test whose answer is discarded and no target language has
+  ;; a use for it.
+  (when (not (<= 3 (count form) 4))
+    (throw (ex-info (str "kin: `if` takes a test, a then and an optional else, "
+                         "and was given " (dec (count form))
+                         " forms. Wrap an arm in `do` -- and note that `comment`"
+                         " is a form like any other.")
+                    {:form (first form) :arity (dec (count form))})))
   (let [[_ test then else] form
         c (kin/render ctx test)]
     (kin/emit! ctx
