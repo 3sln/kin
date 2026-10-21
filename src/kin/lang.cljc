@@ -2450,6 +2450,16 @@
             (kin/before! ctx ind "}\n"))
           (kin/emit! ctx b))))))
 
+;; Native non-returning refusal, like a limit breach. Its payload is a
+;; value, never a format string; it cannot masquerade as an expression.
+(defn- panic-statement [ctx form]
+  (when-not (= :statement (kin/position ctx))
+    (throw (ex-info "kin: panic is a statement, not a value" {:form form})))
+  ((call {:go "panic({0})"
+          :rust "panic!(\"{}\", {0})"
+          :java "throw new IllegalArgumentException({0})"
+          :csharp "throw new System.ArgumentException({0})"}) ctx form))
+
 (defn go-forms
   "The Go arms. `:default-tag` means what it means above.
 
@@ -2487,6 +2497,7 @@
     ;; field through the target's `:local-name` -- and Go spells a field
     ;; access with a dot like everyone else. The base map's own function.
     '. field-form
+    'panic panic-statement
     'comment comment-form
     'doc doc-form
     'do (fn [ctx form] (doseq [f (rest form)] (kin/statement! ctx f)))
@@ -2521,6 +2532,7 @@
     'let (let-form default-tag)
     'defstruct (defstruct-form default-tag)
     '. field-form 'set (set-form (merge base-compound compound)) 'if if-form 'return return-form
+    'panic panic-statement
     'comment comment-form 'doc doc-form
     'case case-form 'defconst defconst-form
     ;; `defdata` -- a data table, generated into every target, with its

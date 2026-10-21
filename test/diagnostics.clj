@@ -163,7 +163,7 @@
      ;; vector is the shape either way, so a reader does not have to know
      ;; which case they are looking at.
      {'narrow [{:targets #{:rust} :forms 1 :tags 1 :names 0}]
-      'wide [{:targets #{:rust :java} :forms 39 :tags 2 :names 0}]}]
+      'wide [{:targets #{:rust :java} :forms 40 :tags 2 :names 0}]}]
     [(:sources r) (into {} (:vocabularies r))])
 
 ;; AND WITH ONE MAP EACH, NOTHING IS SPLIT. `:split` names the symbols whose
