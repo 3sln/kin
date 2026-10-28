@@ -517,3 +517,9 @@ and returns 0 on a miss. Store snapshots its inputs, returns 0 for an oversized
 entry, and leaves an existing key's immutable value intact. Lookup/store are
 synchronized; FIFO eviction changes only reuse. Application builders and keys
 remain in the consuming source. See `test/memo.clj` for four native examples.
+
+A `:key-ops` entry may be `:bytes` when the declared parameter is a native
+byte array/slice. This uses a private byte snapshot and native byte equality;
+it avoids widening source bytes to integers. Bytes conservatively count as
+one cell each in the retention budget. Integer arena keys compare in groups
+of eight with a scalar tail; OR of XOR differences preserves exact equality.

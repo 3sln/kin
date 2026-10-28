@@ -882,3 +882,10 @@ builders run outside this storage primitive. No lock or mutable arena escapes.
 The source owns what belongs in the key and what the cached payload means.
 
 | [x] | D1190 | BOUNDED ARENA SNAPSHOTS WITHOUT HOST CACHE LOGIC | Four-target emitter with exact multi-arena keys, immutable snapshots, synchronized lookup/store, FIFO eviction and bounded admission. All Kin tests pass, including compiled Go/Rust/Java/C# cache tests for byte/arena identity, snapshots, cleared misses, admission, FIFO and oversize preservation; eight concurrent workers exercise distinct payloads in every target, Go with the race detector. Nome's selector-bucket builder is the first consumer; its application laws and mutation gates live in nome. |
+
+The D1190 emitter also accepts `:bytes` keys (native immutable byte runs), with
+native byte equality and private byte snapshots. Generic arena keys compare
+eight cells per group and then the tail. This reduces validation overhead
+without weakening equality: differences are OR-reduced, never XOR-reduced.
+Four native tests cover every changed cell at lengths 0/1/7/8/9/15/16/17/32,
+including signed extrema and paired bit flips that must not cancel.

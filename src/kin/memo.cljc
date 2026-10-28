@@ -11,7 +11,10 @@
   "A defdata emitter with :load and :store accessors, N keys and one value.
 
   :data is the capacity in 32-bit cells (keys + values + one per entry).
-  :key-ops supplies [length read] per key; :value-ops is [length read drop push].
+  :key-ops supplies :bytes for a native byte-array key, or [length read] for
+  an integer arena. Byte keys use native byte comparison and snapshots; each
+  retained byte conservatively counts as one cell. :value-ops is
+  [length read drop push].
   Both accessors return 1 on success, 0 on miss/oversize. Load clears its output
   on miss as well as hit. Store is idempotent for a key. FIFO eviction affects
   performance only. Keys include every cell, with no probabilistic equality."
@@ -25,13 +28,28 @@
                          (= 2 (count accessors)) ld st (<= 1 n 16)
                          (= (inc n) (:arity ld) (:arity st))
                          (= (mapv :type (:params ld)) (mapv :type (:params st)))
-                         (every? #(= 2 (count %)) key-ops) (= 4 (count value-ops)))
+                         (every? #(or (= :bytes %) (and (sequential? %) (= 2 (count %)))) key-ops) (= 4 (count value-ops)))
             (throw (ex-info "kin.memo/arena-cache: positive capacity, matching load/store signatures and arena operations required" {:binding bound})))
+        native? (fn [k] (= :bytes (nth key-ops k)))
+        _ (doseq [k (range n) :when (native? k)]
+            (when-not (= (get {:rust "&[u8]" :go "[]byte" :java "byte[]" :csharp "byte[]"} target)
+                         (:type (nth (:params ld) k)))
+              (throw (ex-info "kin.memo/arena-cache: :bytes requires a native byte-array parameter" {:binding bound :key k}))))
         expr (fn [op arg & more]
                (-> (kin/render ctx (apply list op (symbol arg) more))
                    (str/replace "7654321" (if (= target :rust) "i as i32" "i"))))
-        lens (mapv (fn [k [len _]] (expr len (str "key" k))) (range) key-ops)
-        reads (mapv (fn [k [_ read]] (expr read (str "key" k) 7654321)) (range) key-ops)
+        lens (mapv (fn [k ops]
+                     (if (native? k)
+                       (case target
+                         :rust (str "key" k ".len() as i32")
+                         :go (str "int32(len(key" k "))")
+                         :java (str "key" k ".length")
+                         :csharp (str "key" k ".Length"))
+                       (expr (first ops) (str "key" k)))) (range) key-ops)
+        read-at (fn [k at]
+                  (str/replace (kin/render ctx (list (second (nth key-ops k)) (symbol (str "key" k)) 7654321))
+                               "7654321" at))
+        reads (mapv (fn [k] (when-not (native? k) (read-at k (if (= target :rust) "i as i32" "i")))) (range n))
         [vlen vread vdrop vpush] value-ops
         vl (expr vlen "value") vr (expr vread "value" 7654321)
         clear (expr vdrop "value" 0)
@@ -60,21 +78,44 @@
                  :go (str "for i := int32(0); i < " limit "; i++ { " body " }\n")
                  (str "for (int i = 0; i < " limit "; i++) { " body " }\n")))
         lenof (fn [a] (case target :rust (str a ".len() as i32") :go (str "int32(len(" a "))") :java (str a ".length") :csharp (str a ".Length")))
-        eqbody (apply str (for [k (range n)]
-                           (str "if " (when (#{:java :csharp} target) "(")
-                                (lenof (ref k)) " != " (lens k) (when (#{:java :csharp} target) ")")
-                                " { return false; }\n"
-                                (fori (lens k) (str "if " (when (#{:java :csharp} target) "(")
-                                  (reads k) " != " (ref k) "[" index "]" (when (#{:java :csharp} target) ")")
-                                  " { return false; }")))))
-        copykeys (apply str (for [k (range n)]
-                             (str (case target
-                                    :rust (str "let mut key" k "copy = Vec::with_capacity(" (lens k) " as usize);\n")
-                                    :go (str "key" k "copy := make([]int32, " (lens k) ")\n")
-                                    (str "int[] key" k "copy = new int[" (lens k) "];\n"))
-                               (fori (lens k) (case target
-                                 :rust (str "key" k "copy.push(" (reads k) ");")
-                                 (str "key" k "copy[i] = " (reads k) ";"))))))
+        branch (fn [condition] (str "if " (when (#{:java :csharp} target) "(") condition
+                                       (when (#{:java :csharp} target) ")") " { return false; }\n"))
+        eqbody (apply str
+                 (for [k (range n)]
+                   (if (native? k)
+                     (branch (case target
+                               :go (str "!bytes.Equal(" (ref k) ", key" k ")")
+                               :rust (str (ref k) ".as_slice() != key" k)
+                               :java (str "!java.util.Arrays.equals(" (ref k) ", key" k ")")
+                               :csharp (str "!System.MemoryExtensions.SequenceEqual<byte>(new System.ReadOnlySpan<byte>(" (ref k) "), new System.ReadOnlySpan<byte>(key" k "))")))
+                     (let [offset (fn [j] (if (zero? j) "i" (str "(i + " j ")")))
+                           sub (fn [j] (str (ref k) "[" (offset j) (when (= target :rust) " as usize") "]"))
+                           mismatch (str "(" (str/join " | " (for [j (range 8)]
+                                                  (str "(" (read-at k (offset j)) " ^ " (sub j) ")"))) ") != 0")]
+                       (str "{\n" (case target :go (str "n := " (lens k) "\ni := int32(0)\n")
+                                               :rust (str "let n = " (lens k) "; let mut i: i32 = 0;\n")
+                                               (str "int n = " (lens k) "; int i = 0;\n"))
+                            (branch (str (lenof (ref k)) " != n"))
+                            (if (#{:java :csharp} target) "while (i + 8 <= n) {\n" (if (= target :go) "for i + 8 <= n {\n" "while i + 8 <= n {\n"))
+                            (branch mismatch) "i += 8;\n}\n"
+                            (if (#{:java :csharp} target) "while (i < n) {\n" (if (= target :go) "for i < n {\n" "while i < n {\n"))
+                            (branch (str (read-at k "i") " != " (sub 0)))
+                            "i += 1;\n}\n}\n")))))
+        copykeys (apply str
+                   (for [k (range n)]
+                     (if (native? k)
+                       (case target
+                         :rust (str "let key" k "copy = key" k ".to_vec();\n")
+                         :go (str "key" k "copy := append([]byte(nil), key" k "...)\n")
+                         :java (str "byte[] key" k "copy = key" k ".clone();\n")
+                         :csharp (str "byte[] key" k "copy = (byte[])key" k ".Clone();\n"))
+                       (str (case target
+                              :rust (str "let mut key" k "copy = Vec::with_capacity(" (lens k) " as usize);\n")
+                              :go (str "key" k "copy := make([]int32, " (lens k) ")\n")
+                              (str "int[] key" k "copy = new int[" (lens k) "];\n"))
+                            (fori (lens k) (if (= target :rust)
+                                             (str "key" k "copy.push(" (reads k) ");")
+                                             (str "key" k "copy[i] = " (reads k) ";")))))))
         copyvalue (str (case target
                         :rust (str "let mut snapshot = Vec::with_capacity(" vl " as usize);\n")
                         :go (str "snapshot := make([]int32, " vl ")\n")
@@ -87,14 +128,21 @@
                     (str "if (" ln " > " data ") return 0;\n"))))
         weight (str "1 + " (str/join " + " (conj lens vl)))
         initargs (str/join ", " (conj (mapv #(str "key" % "copy") (range n)) "snapshot"))
+        stored-type (fn [k] (case target
+                              :rust (if (native? k) "Vec<u8>" "Vec<i32>")
+                              :go (if (native? k) "[]byte" "[]int32")
+                              (if (native? k) "byte[]" "int[]")))
         fields (case target
-                 :rust (str "struct " entry " { " (apply str (for [k names] (str k ": Vec<i32>, "))) "value: Vec<i32> }\n")
-                 :go (str "type " entry " struct { " (apply str (for [k names] (str k " []int32; "))) "value []int32 }\n")
-                 (str (if (= target :java) "private static final class " "private sealed class ") entry " {\n"
-                   (apply str (for [k (conj names "value")] (str (if (= target :java) "final " "internal readonly ") "int[] " k ";\n")))
-                   (if (= target :java) "" "internal ") entry "(" (str/join ", " (map #(str "int[] " %) (conj names "value"))) ") { "
-                   (apply str (for [k (conj names "value")] (str "this." k " = " k "; "))) "}\n}\n"))]
-    (when (= target :go) (lang/need! ctx "sync"))
+                 :rust (str "struct " entry " { " (apply str (for [k (range n)] (str "key" k ": " (stored-type k) ", "))) "value: Vec<i32> }\n")
+                 :go (str "type " entry " struct { " (apply str (for [k (range n)] (str "key" k " " (stored-type k) "; "))) "value []int32 }\n")
+                 (let [typed (conj (mapv (fn [k] [(stored-type k) (str "key" k)]) (range n)) ["int[]" "value"])]
+                   (str (if (= target :java) "private static final class " "private sealed class ") entry " {\n"
+                        (apply str (for [[ty nm] typed] (str (if (= target :java) "final " "internal readonly ") ty " " nm ";\n")))
+                        (if (= target :java) "" "internal ") entry "(" (str/join ", " (map (fn [[ty nm]] (str ty " " nm)) typed)) ") { "
+                        (apply str (for [[_ nm] typed] (str "this." nm " = " nm "; "))) "}\n}\n")))]
+    (when (= target :go)
+      (lang/need! ctx "sync")
+      (when (some native? (range n)) (lang/need! ctx "bytes")))
     {:accessors {load (str "{unit}" getfn "(" (str/join ", " (map #(str "{" % "}") (range (inc n)))) ")")
                  store (str "{unit}" putfn "(" (str/join ", " (map #(str "{" % "}") (range (inc n)))) ")")}
      :helpers
