@@ -866,3 +866,19 @@ recoverable from a one-word mention.
 **Asked, not assumed.** Until it is answered, indent is carried as a
 provisional `:indent` on the target descriptor, marked in the code as standing
 in for `:wrap`.
+
+## P — Bounded integer-arena snapshots (nome D1190)
+
+`kin.memo/arena-cache` is an opt-in `defdata` emitter, registered in a
+consumer's target descriptors. The declaration supplies its capacity, matching
+load/store signatures, and ordinary Kin forms for reading keys and copying the
+value arena. The emitter assumes no host fields or application layout.
+
+Generated storage serializes access with a mutex/monitor, compares every key
+cell, retains private snapshots, copies reads into caller-owned arenas, and
+bounds retention by key/value cells plus one cell per FIFO entry. Oversize
+entries are refused before allocation; duplicate stores are idempotent. Source
+builders run outside this storage primitive. No lock or mutable arena escapes.
+The source owns what belongs in the key and what the cached payload means.
+
+| [x] | D1190 | BOUNDED ARENA SNAPSHOTS WITHOUT HOST CACHE LOGIC | Four-target emitter with exact multi-arena keys, immutable snapshots, synchronized lookup/store, FIFO eviction and bounded admission. All Kin tests pass, including compiled Go/Rust/Java/C# cache tests for byte/arena identity, snapshots, cleared misses, admission, FIFO and oversize preservation; eight concurrent workers exercise distinct payloads in every target, Go with the race detector. Nome's selector-bucket builder is the first consumer; its application laws and mutation gates live in nome. |

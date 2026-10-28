@@ -507,3 +507,13 @@ overruled.
 ## Licence
 
 See LICENSE.
+
+`kin.memo/arena-cache` is an optional `defdata` emitter for bounded process-wide
+integer-arena snapshots. A source supplies `:data` (capacity in retained cells),
+`:load`/`:store` accessor names, `:key-ops` (`[length read]` per key), and
+`:value-ops` (`[length read drop push]`). Register the emitter in each target's
+`:data-emitters`. Load replaces its output and returns 1 on a hit, or clears it
+and returns 0 on a miss. Store snapshots its inputs, returns 0 for an oversized
+entry, and leaves an existing key's immutable value intact. Lookup/store are
+synchronized; FIFO eviction changes only reuse. Application builders and keys
+remain in the consuming source. See `test/memo.clj` for four native examples.

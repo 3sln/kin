@@ -1,0 +1,60 @@
+#!/usr/bin/env bb
+(require '[kin] '[kin.lang :as lang] '[kin.memo :as memo]
+         '[kin.target :as target] '[clojure.string :as str]
+         '[babashka.fs :as fs] '[babashka.process :refer [shell]])
+(def targets {:go target/go :rust target/rust :java target/java :csharp target/csharp})
+(def I32 {:name 'I32 :types {:go "int32" :rust "i32" :java "int" :csharp "int"}})
+(def operations ['blen 'bat 'alen 'aat 'adrop 'apush])
+(def vocabulary {:namespace 'demo :targets (set (keys targets)) :tags {'I32 I32}
+                 :names {} :literal-tag (fn [_] I32)
+                 :forms (into {} (for [op operations] [op (lang/call (zipmap (keys targets) (repeat (str op "({0}" (when (#{'bat 'aat 'adrop 'apush} op) ", {1}") ")"))))]))})
+(defn declaration [t]
+  (let [types (case t :rust ["&[u8]" "&mut Vec<i32>" "&mut Vec<i32>"]
+                     :go ["[]byte" "*Arena" "*Arena"]
+                     :java ["byte[]" "Arena" "Arena"]
+                     :csharp ["byte[]" "Arena" "Arena"])]
+    {:binding "Memo" :data 20
+     :options {:load 'load :store 'store :key-ops [['blen 'bat] ['alen 'aat]] :value-ops ['alen 'aat 'adrop 'apush]}
+     :accessors (mapv (fn [name] {:name name :arity 3 :params (mapv #(hash-map :type %) types)}) ['load 'store])}))
+(defn generate [t decl]
+  (let [vocabs {'demo vocabulary}
+        scope (kin/require-scope '(ns probe (:require [demo :refer [blen bat alen aat adrop apush I32]])) vocabs)
+        ctx (assoc (kin/context {} t) :vocabs vocabs :scope-syms scope
+                   :vocab-order ['demo] :targets targets :locals (atom {}) :names (atom {}) :local-tags (atom {}) :tmp (atom 0))]
+    (memo/arena-cache ctx decl)))
+(def failures (atom 0))
+(defn check [label pred]
+  (println (str (if pred "  ok   " "  FAIL ") label))
+  (when-not pred (swap! failures inc)))
+(defn refuses [t decl]
+  (try (generate t decl) false (catch clojure.lang.ExceptionInfo _ true)))
+(def runtime
+  {:go "package main\nimport (\"sync\"; \"fmt\")\ntype Arena struct {v []int32}; func alen(a *Arena) int32{return int32(len(a.v))};func aat(a *Arena,i int32)int32{return a.v[i]};func adrop(a *Arena,i int32){a.v=a.v[:i]};func apush(a *Arena,v int32){a.v=append(a.v,v)};func blen(b []byte)int32{return int32(len(b))};func bat(b []byte,i int32)int32{return int32(b[i])}\n"
+   :rust "#![allow(non_snake_case)]\nfn alen(a:&mut Vec<i32>)->i32{a.len() as i32} fn aat(a:&mut Vec<i32>,i:i32)->i32{a[i as usize]} fn adrop(a:&mut Vec<i32>,i:i32){a.truncate(i as usize);} fn apush(a:&mut Vec<i32>,v:i32){a.push(v);} fn blen(b:&[u8])->i32{b.len() as i32} fn bat(b:&[u8],i:i32)->i32{b[i as usize] as i32}\n"
+   :java "public class Main {static class Arena {java.util.ArrayList<Integer> v=new java.util.ArrayList<>(); Arena(int... xs){for(int x:xs)v.add(x);}} static int alen(Arena a){return a.v.size();} static int aat(Arena a,int i){return a.v.get(i);} static void adrop(Arena a,int i){a.v.subList(i,a.v.size()).clear();} static void apush(Arena a,int v){a.v.add(v);} static int blen(byte[] b){return b.length;} static int bat(byte[] b,int i){return b[i]&255;}\n"
+   :csharp "class Main_ {internal class Arena {internal System.Collections.Generic.List<int> v=new();internal Arena(params int[] xs){v.AddRange(xs);}} static int alen(Arena a){return a.v.Count;} static int aat(Arena a,int i){return a.v[i];} static void adrop(Arena a,int i){a.v.RemoveRange(i,a.v.Count-i);} static void apush(Arena a,int v){a.v.Add(v);} static int blen(byte[] b){return b.Length;} static int bat(byte[] b,int i){return b[i];}\n"})
+(def bodies
+  {:go "func law(k int32) {a:=&Arena{[]int32{k,2}}; v:=&Arena{[]int32{k*7,-7}}; key:=[]byte{0,255}; MemoStore(key,a,v); v.v[0]=99; a.v[0]=-1; a.v[0]=k; o:=&Arena{}; if MemoLoad(key,a,o)==1 {if len(o.v)!=2||o.v[0]!=k*7||o.v[1]!=-7 {panic(\"snapshot\")}; o.v[0]=0; if MemoLoad(key,a,o)==1&&o.v[0]!=k*7 {panic(\"read alias\")}}; a.v[1]=3;if MemoLoad(key,a,o)!=0||len(o.v)!=0 {panic(\"changed key\")}; a.v=[]int32{k,2,0};if MemoLoad(key,a,o)!=0 {panic(\"key length\")} };func main(){law(1);var w sync.WaitGroup;for j:=0;j<8;j++{w.Add(1);go func(j int){defer w.Done();for i:=0;i<100;i++{law(int32(j*100+i+1000))}}(j)};w.Wait();fmt.Println(\"PASS snapshots and parallel keys\")}"
+   :rust "fn law(k:i32){let mut a=vec![k,2];let mut v=vec![k*7,-7];let key=&[0u8,255];MemoStore(key,&mut a,&mut v);v[0]=99;a[0]=-1;a[0]=k;let mut o=vec![];if MemoLoad(key,&mut a,&mut o)==1{assert_eq!(o,vec![k*7,-7]);o[0]=0;if MemoLoad(key,&mut a,&mut o)==1{assert_eq!(o[0],k*7);}} a[1]=3;assert_eq!(MemoLoad(key,&mut a,&mut o),0);assert!(o.is_empty());a=vec![k,2,0];assert_eq!(MemoLoad(key,&mut a,&mut o),0);}fn main(){law(1);std::thread::scope(|s|{for j in 0..8{s.spawn(move||{for i in 0..100{law(j*100+i+1000);}});}});println!(\"PASS snapshots and parallel keys\");}"
+   :java "static void law(int k){Arena a=new Arena(k,2),v=new Arena(k*7,-7),o=new Arena();byte[] key={0,(byte)255};MemoStore(key,a,v);v.v.set(0,99);a.v.set(0,-1);a.v.set(0,k);if(MemoLoad(key,a,o)==1){if(o.v.size()!=2||o.v.get(0)!=k*7||o.v.get(1)!=-7)throw new AssertionError(\"snapshot\");o.v.set(0,0);if(MemoLoad(key,a,o)==1&&o.v.get(0)!=k*7)throw new AssertionError(\"read alias\");}a.v.set(1,3);if(MemoLoad(key,a,o)!=0||o.v.size()!=0)throw new AssertionError(\"changed key\");a=new Arena(k,2,0);if(MemoLoad(key,a,o)!=0)throw new AssertionError(\"length\");}public static void main(String[] args)throws Exception{law(1);Thread[] ts=new Thread[8];java.util.concurrent.atomic.AtomicReference<Throwable> bad=new java.util.concurrent.atomic.AtomicReference<>();for(int j=0;j<8;j++){final int t=j;ts[j]=new Thread(()->{try{for(int i=0;i<100;i++)law(t*100+i+1000);}catch(Throwable e){bad.set(e);}});ts[j].start();}for(Thread t:ts)t.join();if(bad.get()!=null)throw new AssertionError(bad.get());System.out.println(\"PASS snapshots and parallel keys\");}}"
+   :csharp "static void law(int k){var a=new Arena(k,2);var v=new Arena(k*7,-7);var o=new Arena();byte[] key={0,255};MemoStore(key,a,v);v.v[0]=99;a.v[0]=-1;a.v[0]=k;if(MemoLoad(key,a,o)==1){if(o.v.Count!=2||o.v[0]!=k*7||o.v[1]!=-7)throw new System.Exception(\"snapshot\");o.v[0]=0;if(MemoLoad(key,a,o)==1&&o.v[0]!=k*7)throw new System.Exception(\"read alias\");}a.v[1]=3;if(MemoLoad(key,a,o)!=0||o.v.Count!=0)throw new System.Exception(\"changed key\");a=new Arena(k,2,0);if(MemoLoad(key,a,o)!=0)throw new System.Exception(\"length\");}static void Main(){law(1);System.Threading.Tasks.Parallel.For(0,8,j=>{for(int i=0;i<100;i++)law(j*100+i+1000);});System.Console.WriteLine(\"PASS snapshots and parallel keys\");}}"})
+(def bounds
+  {:go "func basic(){key:=[]byte{0,255};a:=&Arena{[]int32{1,2}};v:=&Arena{[]int32{7,-7}};o:=&Arena{[]int32{99}};if MemoLoad(key,a,o)!=0||len(o.v)!=0{panic(\"miss\")};if MemoStore(key,a,v)!=1||MemoLoad(key,a,o)!=1||o.v[0]!=7{panic(\"admission\")};key[0]=1;if MemoLoad(key,a,o)!=0{panic(\"byte identity\")};key[0]=0;for j:=int32(3);j<=7;j++{a.v[0]=j;v.v[0]=j;MemoStore(key,a,v)};a.v[0]=1;if MemoLoad(key,a,o)!=0{panic(\"FIFO\")};a.v[0]=7;huge:=&Arena{make([]int32,21)};if MemoStore(key,a,huge)!=0||MemoLoad(key,a,o)!=1||o.v[0]!=7{panic(\"bounded admission\")}}\n"
+   :rust "fn basic(){let mut key=[0u8,255];let mut a=vec![1,2];let mut v=vec![7,-7];let mut o=vec![99];assert_eq!(MemoLoad(&key,&mut a,&mut o),0);assert!(o.is_empty());assert_eq!(MemoStore(&key,&mut a,&mut v),1);assert_eq!(MemoLoad(&key,&mut a,&mut o),1);assert_eq!(o[0],7);key[0]=1;assert_eq!(MemoLoad(&key,&mut a,&mut o),0);key[0]=0;for j in 3..=7{a[0]=j;v[0]=j;MemoStore(&key,&mut a,&mut v);}a[0]=1;assert_eq!(MemoLoad(&key,&mut a,&mut o),0);a[0]=7;assert_eq!(MemoStore(&key,&mut a,&mut vec![0;21]),0);assert_eq!(MemoLoad(&key,&mut a,&mut o),1);assert_eq!(o[0],7);}\n"
+   :java "static void basic(){byte[] key={0,(byte)255};Arena a=new Arena(1,2),v=new Arena(7,-7),o=new Arena(99);if(MemoLoad(key,a,o)!=0||o.v.size()!=0)throw new AssertionError(\"miss\");if(MemoStore(key,a,v)!=1||MemoLoad(key,a,o)!=1||o.v.get(0)!=7)throw new AssertionError(\"admission\");key[0]=1;if(MemoLoad(key,a,o)!=0)throw new AssertionError(\"byte identity\");key[0]=0;for(int j=3;j<=7;j++){a.v.set(0,j);v.v.set(0,j);MemoStore(key,a,v);}a.v.set(0,1);if(MemoLoad(key,a,o)!=0)throw new AssertionError(\"FIFO\");a.v.set(0,7);if(MemoStore(key,a,new Arena(new int[21]))!=0||MemoLoad(key,a,o)!=1||o.v.get(0)!=7)throw new AssertionError(\"bounded admission\");}\n"
+   :csharp "static void basic(){byte[] key={0,255};var a=new Arena(1,2);var v=new Arena(7,-7);var o=new Arena(99);if(MemoLoad(key,a,o)!=0||o.v.Count!=0)throw new System.Exception(\"miss\");if(MemoStore(key,a,v)!=1||MemoLoad(key,a,o)!=1||o.v[0]!=7)throw new System.Exception(\"admission\");key[0]=1;if(MemoLoad(key,a,o)!=0)throw new System.Exception(\"byte identity\");key[0]=0;for(int j=3;j<=7;j++){a.v[0]=j;v.v[0]=j;MemoStore(key,a,v);}a.v[0]=1;if(MemoLoad(key,a,o)!=0)throw new System.Exception(\"FIFO\");a.v[0]=7;if(MemoStore(key,a,new Arena(new int[21]))!=0||MemoLoad(key,a,o)!=1||o.v[0]!=7)throw new System.Exception(\"bounded admission\");}\n"})
+(def work (fs/create-temp-dir {:prefix "kin-memo-"}))
+(try
+  (doseq [t [:go :rust :java :csharp]]
+    (let [decl (declaration t) result (generate t decl) code (str (runtime t) (bounds t) (str/join "\n" (:helpers result)) "\n" (str/replace (bodies t) "law(1);" "basic();law(1);"))
+          folder (str (fs/create-dirs (fs/path work (name t))))]
+      (check (str t " exposes only the declared two accessors") (= #{'load 'store} (set (keys (:accessors result)))))
+      (doseq [d [(assoc decl :data 0) (assoc-in decl [:options :key-ops] []) (assoc decl :accessors [])]]
+        (check (str t " rejects malformed cache") (refuses t d)))
+      (case t
+        :go (do (spit (str folder "/main.go") code) (shell {:dir folder} "go run -race main.go"))
+        :rust (do (spit (str folder "/main.rs") code) (shell {:dir folder} "rustc --edition 2021 main.rs -o run") (shell {:dir folder} "./run"))
+        :java (do (spit (str folder "/Main.java") code) (shell {:dir folder} "/opt/homebrew/opt/openjdk/bin/javac -encoding UTF-8 Main.java") (shell {:dir folder} "/opt/homebrew/opt/openjdk/bin/java Main"))
+        :csharp (do (spit (str folder "/Program.cs") code) (spit (str folder "/test.csproj") "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>") (shell {:dir folder} "dotnet run --project test.csproj --verbosity quiet")))))
+  (finally (fs/delete-tree work)))
+(when (pos? @failures) (System/exit 1))
