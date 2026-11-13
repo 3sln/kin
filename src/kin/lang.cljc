@@ -1686,7 +1686,18 @@
                ;; `{unit}CASE_UPPER[{1}]` and never learns where it is being
                ;; called from, which is the only way it could be right in
                ;; both places.
-               (fill (str/replace (str tmpl) "{unit}" (qualified "")) args))))))))})
+               ;;
+               ;; BUT ONLY WHEN THE TEMPLATE ASKS. Asking is what registers
+               ;; the import, so a template with no `{unit}` -- a count that
+               ;; inlines to a literal -- never names the other module, and
+               ;; an import for it is one the body does not use. Go refuses
+               ;; that outright (`imported and not used`); Java and C#
+               ;; only warn. The header is for what the code references.
+               (let [t (str tmpl)]
+                 (fill (if (str/includes? t "{unit}")
+                         (str/replace t "{unit}" (qualified ""))
+                         t)
+                       args)))))))))})
 
 (defn- array-literal
   "`xs` as one array literal, wrapped at `per-line` and indented to `ctx`.
