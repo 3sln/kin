@@ -889,3 +889,5 @@ eight cells per group and then the tail. This reduces validation overhead
 without weakening equality: differences are OR-reduced, never XOR-reduced.
 Four native tests cover every changed cell at lengths 0/1/7/8/9/15/16/17/32,
 including signed extrema and paired bit flips that must not cancel.
+
+| [x] | D1191 | AN IMPORT IS FOR WHAT THE CODE REFERENCES | A `defdata` accessor asked for the unit qualifier whether or not its template used `{unit}`, and asking registers the import. A `flat-array` count inlines to a literal, so a module that only called it got `import "pkg"` for a package it never mentioned: a Go compile error (`imported and not used`), a warning in Java and C#. The qualifier is now requested only when the template contains `{unit}`. `test/inlined.clj` pins the Go/Java/C# headers and runs `go build` over a two-package project. All Kin tests pass. |
