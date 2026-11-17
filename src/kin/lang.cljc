@@ -158,6 +158,14 @@
   describes a spelling and cannot describe a return convention, so the fact
   rides beside the template rather than in it.
 
+  `(call tmpls {:view {target {:bind B :template T}}})` says the form reads
+  or writes THROUGH a view of its subject argument (`:arg`, default 0)
+  without moving it: when the enclosing `defn` bound that subject's view
+  (`B` filled with the parameter) to a local, the form is spelled `T` with
+  the local in the subject's place. A form that moves the view says nothing
+  and the subject is never viewed. Go's `defn` is the one that binds them
+  (`go-views`), because Go cannot hoist the load itself.
+
   A target with no template is REFUSED by name. It used to fill `nil`, which
   `fmt` turned into an empty string, so a vocabulary that claimed to speak a
   target and had missed one form emitted a blank where a call should be --
@@ -165,7 +173,8 @@
   Tags and names are checked when the vocabulary loads; a form is a function
   and cannot be, so it is checked here, the first time it is asked."
   ([tmpls] (call tmpls nil))
-  ([tmpls {:keys [tag throws arity]}]
+  ([tmpls {:keys [tag throws arity view]}]
+   (with-meta
    (fn [ctx form]
     (let [tmpl (or (get tmpls (t ctx))
                    (throw (ex-info
@@ -203,7 +212,20 @@
                              " -- too many are dropped silently, and the code still compiles."))
                       {:form (first form) :target (t ctx)
                        :template tmpl :wanted want :given got})))
-          code (fill tmpl (mapv (fn [f] (kin/render ctx f)) (rest form)))
+          texts (mapv (fn [f] (kin/render ctx f)) (rest form))
+          ;; A READ THROUGH A VIEW THE ENCLOSING FUNCTION HOISTED (`:view`,
+          ;; above): the subject argument is spelled as the local that holds
+          ;; it, in the view's own template. `go-views` binds a parameter only
+          ;; when every form naming it shares one `:bind`, so the local is
+          ;; this form's view.
+          v (get view (t ctx))
+          at (:arg v 0)
+          held (when v
+                 (let [subj (nth form (inc at) nil)]
+                   (when (symbol? subj) (get (kin/get ctx :views) subj))))
+          code (if held
+                 (fill (:template v) (assoc texts at (:local held)))
+                 (fill tmpl texts))
           ;; WHAT THIS CALL PRODUCED. `:tag` may be a value or a function of
           ;; the context, which is the form deciding about its own product --
           ;; kin carries the answer and does not read it.
@@ -215,7 +237,10 @@
         (nil? code) nil
         (= :statement (kin/position ctx))
         (kin/emit! ctx (kin/indent-of ctx) code ";\n")
-        :else (kin/emit! ctx code))))))
+        :else (kin/emit! ctx code))))
+   ;; THE VIEW RIDES ON THE IMPLEMENTATION, where a `defn` scanning its
+   ;; body can find it through `kin/implementation` without rendering.
+   {:kin/view view})))
 
 ;; THERE IS NO `bit-shift-right` HERE, and its absence is the point.
 ;;
@@ -2042,6 +2067,91 @@
         (do (kin/before! ctx ind ev " := " call "\n" fail)
             "")))))
 
+;; ------------------------------------------------------------ hoisted views
+;;
+;; GO HAS NO LOOP-INVARIANT CODE MOTION THROUGH A POINTER. `port.CellsAt(c, i)`
+;; inlines to a load of `c.V`'s header, a bounds check and the read -- and the
+;; header is loaded again for every read, in every iteration, because the
+;; compiler cannot prove nothing between two reads wrote `c.V`. Rust can (a
+;; `&mut` is unaliased) and LLVM hoists it; Go does not.
+;;
+;; A form whose `call` carries a `:view` says: when my subject argument is a
+;; local whose VIEW was bound once (`:bind`, e.g. `{0}.V`), spell me through
+;; that local instead (`:template`, e.g. `{0}[{1}]`). The vocabulary says
+;; which forms READ OR WRITE THROUGH a view without changing it -- a read, a
+;; length, a store into a cell -- and gives the ones that move it (a push, a
+;; truncation) no view at all.
+;;
+;; A PARAMETER IS VIEWED ONLY WHEN EVERY OCCURRENCE OF IT IN THE BODY IS THE
+;; SUBJECT OF ONE SUCH FORM, all under one `:bind`. Anything else -- passed to
+;; a call, rebound, reassigned by `set`, shadowed, used as a value -- is an
+;; occurrence that is not a view's subject, and the parameter is spelled as
+;; before. `^:mut` alone does not refuse one: it marks a binding Rust must
+;; call `mut`, and only a `set` of the name would reassign it. So nothing in the function can move the view, and
+;; nothing ELSE can either: kin's Rust passes every arena as `&mut`, and
+;; Rust refuses one arena under two names in one call, so no other parameter
+;; is the same arena.
+
+(defn- implementation-now
+  "The implementation `form` would run, through a filled forward declaration."
+  [ctx form]
+  (let [f (kin/implementation ctx form)]
+    (or (some-> (:kin/pending (meta f)) deref) f)))
+
+(defn- view-of [ctx form]
+  (some-> (implementation-now ctx form) meta :kin/view (get (t ctx))))
+
+(defn- keeps-of
+  "The argument positions a generated callee KEEPS -- never moves the view of
+  -- or the empty set. A `defn` whose body only reads, writes through or keeps
+  a parameter says so on the call it registers, so a caller passing its own
+  parameter there may still view it."
+  [ctx form]
+  (or (some-> (implementation-now ctx form) meta :kin/keeps (get (t ctx))) #{}))
+
+(defn- go-views
+  "What this body does with each parameter: `{:views {param {:bind b :local
+  name}} :keeps #{index}}` -- the parameters it may view, and the positions
+  whose view it never moves."
+  [ctx params body]
+  (let [cands (set params)
+        uses (atom {})
+        use! (fn [p how] (swap! uses update p (fnil conj #{}) how))
+        walk (fn walk [x]
+               (cond
+                 (symbol? x) (when (cands x) (use! x ::other))
+                 (seq? x)
+                 (let [v (view-of ctx x)
+                       i (inc (:arg v 0))
+                       ks (keeps-of ctx x)]
+                   (doseq [[j y] (map-indexed vector x)]
+                     (cond
+                       (and v (= j i) (symbol? y) (cands y)) (use! y (:bind v))
+                       (and (pos? j) (ks (dec j)) (symbol? y) (cands y)) (use! y ::kept)
+                       :else (walk y))))
+                 (map? x) (doseq [[k y] x] (walk k) (walk y))
+                 (coll? x) (doseq [y x] (walk y))))
+        _ (doseq [f body] (walk f))
+        ;; A NAME NOTHING IN THE FUNCTION ALREADY SPELLS. Every symbol in it
+        ;; is spelled the way a local would be and the view takes the first
+        ;; `<name>V`, `<name>VV`, ... that none of them is.
+        taken (into #{}
+                    (keep (fn [x] (when (symbol? x)
+                                    (try (kin/local-name ctx x)
+                                         (catch #?(:clj Exception :cljs :default) _ nil)))))
+                    (tree-seq coll? seq (cons params body)))
+        kept? (fn [p] (not (contains? (get @uses p) ::other)))]
+    {:keeps (into #{} (keep-indexed (fn [k p] (when (kept? p) k))) params)
+     :views (into {}
+                  (keep (fn [p]
+                          (let [binds (disj (get @uses p #{}) ::kept)]
+                            (when (and (kept? p) (= 1 (count binds)))
+                              (let [n (kin/local-name ctx p)]
+                                [p {:bind (first binds)
+                                    :param n
+                                    :local (first (remove taken (iterate #(str % "V") (str n "V"))))}])))))
+                  params)}))
+
 (defn- go-defn
   "`(defn ^I32 gcd [^I32 a ^I32 b] ...)` -- Go puts the type after the name.
 
@@ -2064,13 +2174,15 @@
            params (if method? (rest params) params)
            ps (partition 2 (interleave params (map (fn [p] (:tag (meta p))) params)))
            ty (partial ty-of ctx default)
-          pty (partial pty-of ctx default)]
+          pty (partial pty-of ctx default)
+          {:keys [views keeps]} (go-views ctx params body)]
        ;; VISIBILITY IS THE NAME in Go -- an exported identifier is
        ;; capitalised -- so `^:pub` reaches the target's `:fn-name` through the
        ;; metadata on `nm` and is spelled there, not decided here. That is the
        ;; same division as everywhere else: the form says WHAT, the target HOW.
        (kin/define-form!
         ctx {:scope (if pub? :public :private)} nm
+        (with-meta
         (declared-call
          {:ret ret :home (home-unit ctx)}
          (fn [c qualified args]
@@ -2080,7 +2192,12 @@
                              "(" (str/join ", " (rest as)) ")")
                         (str (qualified (target-name c nm))
                              "(" (str/join ", " as) ")"))]
-             (if-not throws? call (go-propagate c nm ret call))))))
+             (if-not throws? call (go-propagate c nm ret call)))))
+         ;; WHICH ARGUMENTS THIS FUNCTION NEVER MOVES THE VIEW OF, for a
+         ;; caller deciding whether it may view its own (see `go-views`).
+         ;; Only a function with a parameter list known positionally: a
+         ;; method's receiver is not an argument here.
+         {:kin/keeps {:go (if method? #{} keeps)}}))
        (kin/emit!
         ctx (kin/indent-of ctx)
         "func " (go-recv ctx recv default) (target-name ctx nm) "("
@@ -2131,7 +2248,16 @@
                    (fn [in4]
                      (kin/scoped
                       in4 {:key :go-bools :value (atom 0)}
-                      (fn [in5] (doseq [f body] (kin/statement! in5 f)))))))))))))
+                      (fn [in5]
+                        ;; EACH VIEW ONCE, at the top, in parameter order.
+                        (doseq [p params
+                                :let [{:keys [bind param local]} (get views p)]
+                                :when local]
+                          (kin/emit! in5 (kin/indent-of in5) local " := "
+                                     (fmt bind [param]) "\n"))
+                        (kin/scoped
+                         in5 {:key :views :value views}
+                         (fn [in6] (doseq [f body] (kin/statement! in6 f)))))))))))))))
        (kin/emit! ctx (kin/indent-of ctx) "}\n")))})
 
 (defn- go-let

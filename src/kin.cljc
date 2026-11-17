@@ -1359,6 +1359,20 @@
     :vocabulary (group-entry ctx (:namespace res) :forms (:sym res))
     nil))
 
+(defn implementation
+  "What `dispatch` would run for `form` HERE, or nil: the resolution link
+  recorded, else a direct lookup -- the same two steps, in the same order.
+
+  For a form that wants to ask what ANOTHER form is before anything is
+  emitted -- a Go `defn` reading its body for the reads it may hoist. The
+  answer is the implementation; what its metadata says is that form's
+  business, not kin's."
+  [ctx form]
+  (when (and (seq? form) (symbol? (first form)))
+    (or (when-let [res (resolution ctx form)]
+          (implementation-of ctx res))
+        (form-fn ctx (first form)))))
+
 (defn link!
   "Walk `form` in order, resolving every reference and recording it.
 
